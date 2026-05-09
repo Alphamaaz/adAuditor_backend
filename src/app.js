@@ -26,7 +26,7 @@ import { initializeAuditQueueProcessors } from "./queues/auditQueue.js";
 initializeAuditQueueProcessors();
 
 const app = express();
-const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:3000";
+const clientOrigin = process.env.APP_URL || process.env.CLIENT_ORIGIN || "http://localhost:3000";
 
 app.use(logger);
 app.use(
