@@ -1,21 +1,25 @@
 services:
-  # 1. Frontend (Next.js)
+  # 1. Frontend (Next.js) - Mapping to 3050
   frontend:
     build:
       context: ../adAuditor_frontend
       dockerfile: Dockerfile
     restart: always
+    ports:
+      - "3050:3000"
     environment:
       - NEXT_PUBLIC_API_URL=https://api.adadviser.uk
     networks:
       - app-network
 
-  # 2. Backend (Express API)
+  # 2. Backend (Express API) - Mapping to 5050
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     restart: always
+    ports:
+      - "5050:5000"
     environment:
       - DATABASE_URL=postgresql://adauditor:your_secure_password@db:5432/adauditor?schema=public
       - REDIS_URL=redis://redis:6379
@@ -51,28 +55,9 @@ services:
     networks:
       - app-network
 
-  # 5. Reverse Proxy (Caddy)
-  caddy:
-    image: caddy:2-alpine
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - frontend
-      - backend
-    networks:
-      - app-network
-
 networks:
   app-network:
     driver: bridge
 
 volumes:
   postgres_data:
-  caddy_data:
-  caddy_config:
