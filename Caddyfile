@@ -1,0 +1,9 @@
+# Frontend
+adadviser.uk {
+    reverse_proxy frontend:3000
+}
+
+# Backend API
+api.adadviser.uk {
+    reverse_proxy backend:5000
+}

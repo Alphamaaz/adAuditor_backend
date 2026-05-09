@@ -1,0 +1,43 @@
+{
+  "name": "ad-auditor-backend",
+  "version": "1.0.0",
+  "description": "Express API for AdAuditor Pro",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "worker:dev": "nodemon src/worker.js",
+    "check": "node --check src/app.js && node --check src/server.js && node --check src/middlewares/logger.js && node --check src/middlewares/errorHandler.js && node --check src/middlewares/cookies.js && node --check src/middlewares/auth.js && node --check src/middlewares/validate.js && node --check src/middlewares/rateLimit.js && node --check src/middlewares/planEnforcement.js && node --check src/lib/prisma.js && node --check src/utils/appError.js && node --check src/utils/asyncHandler.js && node --check src/utils/password.js && node --check src/utils/sessionToken.js && node --check src/utils/otp.js && node --check src/utils/email.js && node --check src/utils/requestContext.js && node --check src/modules/auth/auth.routes.js && node --check src/modules/auth/auth.controller.js && node --check src/modules/auth/auth.schemas.js && node --check src/modules/auth/auth.presenter.js && node --check src/modules/businessProfile/businessProfile.routes.js && node --check src/modules/businessProfile/businessProfile.controller.js && node --check src/modules/businessProfile/businessProfile.schemas.js && node --check src/modules/plans/plan.routes.js && node --check src/modules/plans/plan.controller.js && node --check src/modules/plans/plan.schemas.js && node --check src/modules/plans/plan.presenter.js && node --check src/modules/plans/plan.service.js && node --check src/modules/plans/plan.defaults.js && node --check src/modules/plans/plan.resolver.js && node --check src/modules/audits/audit.routes.js && node --check src/modules/audits/audit.controller.js && node --check src/modules/audits/audit.schemas.js && node --check src/modules/audits/audit.presenter.js && node --check src/modules/audits/upload.middleware.js && node --check src/modules/audits/manualUpload.service.js && node --check src/modules/audits/auditEngine.service.js && node --check src/modules/audits/uploadRequirements.js && node --check src/modules/audits/uploadReadiness.service.js && node --check src/modules/audits/aiReport.schema.js && node --check src/modules/audits/aiContext.service.js && node --check src/modules/audits/aiProvider.service.js && node --check src/modules/audits/aiReportValidation.service.js && node --check src/modules/audits/pdfReport.service.js && node --check src/scripts/seedSubscriptionPlans.js && node --check src/worker.js && node --check src/queues/jobQueue.js && node --check src/queues/auditQueue.js && node --check src/jobs/auditPipeline.js && node --check src/modules/audits/memorySummary.service.js && node --check src/modules/audits/auditHistory.service.js",
+    "db:seed-plans": "node src/scripts/seedSubscriptionPlans.js",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
+    "axios": "^1.16.0",
+    "bull": "^4.16.5",
+    "cors": "^2.8.6",
+    "dayjs": "^1.11.20",
+    "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "ioredis": "^5.10.1",
+    "morgan": "^1.10.1",
+    "multer": "^2.1.1",
+    "nodemailer": "^8.0.7",
+    "pdfkit": "^0.18.0",
+    "pg": "^8.20.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14",
+    "prisma": "^7.8.0"
+  }
+}

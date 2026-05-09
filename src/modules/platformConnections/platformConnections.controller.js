@@ -1,0 +1,380 @@
+import crypto from "crypto";
+import { prisma } from "../../lib/prisma.js";
+import { getOrganizationId } from "../../utils/requestContext.js";
+import { badRequest, notFound } from "../../utils/appError.js";
+import { encrypt, decrypt } from "../../utils/tokenEncryption.js";
+import {
+  exchangeCodeForToken,
+  getLongLivedToken,
+  debugToken,
+  fetchAdAccounts,
+  fetchCampaignInsights,
+  fetchAdSetInsights,
+  fetchAdInsights,
+  fetchCampaigns,
+  fetchAdSets,
+  fetchAds,
+} from "./meta.service.js";
+import {
+  normalizeCampaignInsights,
+  normalizeAdSetInsights,
+  normalizeAdInsights,
+  enrichCampaignsWithStructure,
+  enrichAdSetsWithStructure,
+  enrichAdsWithStructure,
+  buildMetaNormalizedDataset,
+} from "./metaNormalizer.service.js";
+
+const META_CALLBACK_URL =
+  process.env.META_CALLBACK_URL ||
+  "http://localhost:5000/api/platform-connections/meta/callback";
+
+// ── OAuth handshake ──────────────────────────────────────────────────────────
+
+/**
+ * Step 1: Redirect the user to Meta's authorization dialog.
+ * The `state` param ties the OAuth session back to this user/org.
+ *
+ * GET /api/platform-connections/meta/connect?auditId=...
+ */
+export const initMetaOAuth = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+  const { auditId } = req.query;
+
+  // Encode org + optional audit into state so the callback can restore context
+  const statePayload = JSON.stringify({ organizationId, auditId: auditId || null });
+  const state = Buffer.from(statePayload).toString("base64url");
+
+  const params = new URLSearchParams({
+    client_id: process.env.META_APP_ID,
+    redirect_uri: META_CALLBACK_URL,
+    state,
+    scope: "ads_read,business_management",
+    response_type: "code",
+  });
+
+  const authUrl = `https://www.facebook.com/v19.0/dialog/oauth?${params.toString()}`;
+  res.redirect(authUrl);
+};
+
+/**
+ * Step 2: Meta redirects back here with a code.
+ * We exchange it for a long-lived token and store it encrypted.
+ *
+ * GET /api/platform-connections/meta/callback?code=...&state=...
+ */
+export const metaOAuthCallback = async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+
+  const FRONTEND_BASE = process.env.CLIENT_ORIGIN || "http://localhost:3000";
+
+  if (error) {
+    const message = encodeURIComponent(error_description || error);
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${message}&platform=META`);
+  }
+
+  if (!code || !state) {
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=missing_code&platform=META`);
+  }
+
+  let organizationId;
+  let auditId;
+  try {
+    const decoded = JSON.parse(Buffer.from(state, "base64url").toString());
+    organizationId = decoded.organizationId;
+    auditId = decoded.auditId;
+  } catch {
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=invalid_state&platform=META`);
+  }
+
+  try {
+    // Exchange code → short-lived token
+    const shortTokenData = await exchangeCodeForToken(code, META_CALLBACK_URL);
+    // Exchange short-lived → long-lived token (60 days)
+    const longTokenData = await getLongLivedToken(shortTokenData.access_token);
+    const accessToken = longTokenData.access_token;
+    const expiresIn = longTokenData.expires_in || 5183944; // ~60 days in seconds
+
+    // Verify the token and get user_id from Meta
+    const tokenInfo = await debugToken(accessToken);
+    if (!tokenInfo.is_valid) {
+      return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=invalid_token&platform=META`);
+    }
+
+    const encryptedToken = encrypt(accessToken);
+    const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
+
+    // PlatformConnection has no unique constraint on (organizationId, platform),
+    // so we use findFirst + create/update instead of upsert.
+    const existingConnection = await prisma.platformConnection.findFirst({
+      where: { organizationId, platform: "META" },
+      select: { id: true },
+    });
+
+    if (existingConnection) {
+      await prisma.platformConnection.update({
+        where: { id: existingConnection.id },
+        data: {
+          status: "ACTIVE",
+          externalAccountId: tokenInfo.user_id || null,
+          accessTokenEncrypted: encryptedToken,
+          tokenExpiresAt,
+          scopes: tokenInfo.scopes || ["ads_read", "business_management"],
+          metadata: { debugInfo: tokenInfo },
+        },
+      });
+    } else {
+      await prisma.platformConnection.create({
+        data: {
+          organizationId,
+          platform: "META",
+          externalAccountId: tokenInfo.user_id || null,
+          status: "ACTIVE",
+          accessTokenEncrypted: encryptedToken,
+          tokenExpiresAt,
+          scopes: tokenInfo.scopes || ["ads_read", "business_management"],
+          metadata: { debugInfo: tokenInfo },
+        },
+      });
+    }
+
+    // Redirect to frontend with success signal
+    const successUrl = auditId
+      ? `${FRONTEND_BASE}/dashboard/audits/${auditId}/connect?platform=META&connected=true`
+      : `${FRONTEND_BASE}/dashboard?platform=META&connected=true`;
+
+    return res.redirect(successUrl);
+  } catch (err) {
+    console.error("[Meta OAuth Callback Error]", err.message);
+    const errMsg = encodeURIComponent("Failed to complete Meta connection. Please try again.");
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${errMsg}&platform=META`);
+  }
+};
+
+// ── Connection management ────────────────────────────────────────────────────
+
+/**
+ * GET /api/platform-connections
+ * Returns all connections for the current organization.
+ */
+export const listConnections = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+
+  const connections = await prisma.platformConnection.findMany({
+    where: { organizationId },
+    select: {
+      id: true,
+      platform: true,
+      status: true,
+      externalAccountId: true,
+      tokenExpiresAt: true,
+      scopes: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  res.json({ status: "success", data: connections });
+};
+
+/**
+ * GET /api/platform-connections/meta/ad-accounts
+ * Lists the Meta ad accounts the connected user has access to.
+ */
+export const listMetaAdAccounts = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+
+  const connection = await prisma.platformConnection.findFirst({
+    where: { organizationId, platform: "META", status: "ACTIVE" },
+  });
+
+  if (!connection || !connection.accessTokenEncrypted) {
+    throw notFound("No active Meta connection found. Please connect your Meta account first.");
+  }
+
+  const accessToken = decrypt(connection.accessTokenEncrypted);
+  const adAccounts = await fetchAdAccounts(accessToken);
+
+  res.json({
+    status: "success",
+    data: adAccounts.map((account) => ({
+      id: account.id,
+      accountId: account.account_id,
+      name: account.name,
+      currency: account.currency,
+      status: account.account_status,
+      businessName: account.business?.name || null,
+    })),
+  });
+};
+
+/**
+ * POST /api/platform-connections/meta/fetch-data
+ * Fetches all required Meta data for an audit and stores it as a NormalizedDataset.
+ * Body: { auditId, externalAdAccountId }
+ */
+export const fetchMetaDataForAudit = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+  const { auditId, externalAdAccountId } = req.body;
+
+  if (!auditId || !externalAdAccountId) {
+    throw badRequest("auditId and externalAdAccountId are required.");
+  }
+
+  const [audit, connection] = await Promise.all([
+    prisma.audit.findFirst({
+      where: { id: auditId, organizationId },
+      include: { normalizedDataset: true },
+    }),
+    prisma.platformConnection.findFirst({
+      where: { organizationId, platform: "META", status: "ACTIVE" },
+    }),
+  ]);
+
+  if (!audit) throw notFound("Audit not found.");
+  if (!connection || !connection.accessTokenEncrypted) {
+    throw notFound("No active Meta connection found. Connect your Meta account first.");
+  }
+  if (!audit.selectedPlatforms.includes("META")) {
+    throw badRequest("This audit does not include META as a selected platform.");
+  }
+
+  const accessToken = decrypt(connection.accessTokenEncrypted);
+
+  // The Meta ad account ID from their API is prefixed with "act_"
+  const adAccountId = externalAdAccountId.startsWith("act_")
+    ? externalAdAccountId
+    : `act_${externalAdAccountId}`;
+
+  // Fetch insights + structure data in parallel
+  const [
+    campaignInsights30d,
+    adSetInsights30d,
+    adInsights30d,
+    campaignStructure,
+    adSetStructure,
+    adStructure,
+    campaignInsights90d,
+  ] = await Promise.all([
+    fetchCampaignInsights(accessToken, adAccountId, "last_30d"),
+    fetchAdSetInsights(accessToken, adAccountId, "last_30d"),
+    fetchAdInsights(accessToken, adAccountId, "last_30d"),
+    fetchCampaigns(accessToken, adAccountId),
+    fetchAdSets(accessToken, adAccountId),
+    fetchAds(accessToken, adAccountId),
+    fetchCampaignInsights(accessToken, adAccountId, "last_90d"),
+  ]);
+
+  // Normalize + enrich with structural data
+  const campaigns = enrichCampaignsWithStructure(
+    normalizeCampaignInsights(campaignInsights30d),
+    campaignStructure
+  );
+  const adSets = enrichAdSetsWithStructure(
+    normalizeAdSetInsights(adSetInsights30d),
+    adSetStructure
+  );
+  const ads = enrichAdsWithStructure(
+    normalizeAdInsights(adInsights30d),
+    adStructure
+  );
+  const campaigns90d = normalizeCampaignInsights(campaignInsights90d);
+
+  // Build the normalized dataset in the schema the rule engine expects
+  const normalizedDataset = buildMetaNormalizedDataset({
+    campaignRecords: campaigns,
+    adSetRecords: adSets,
+    adRecords: ads,
+    currency: null, // fetched per-account below if needed
+  });
+
+  // Also include 90-day data in a byLevel bucket for historical rules
+  normalizedDataset.data.platforms.META.byLevel.campaign_90d = campaigns90d;
+
+  // Persist to DB and update audit status
+  await prisma.$transaction(async (tx) => {
+    await tx.normalizedDataset.upsert({
+      where: { auditId },
+      create: {
+        auditId,
+        data: normalizedDataset.data,
+        summary: normalizedDataset.summary,
+      },
+      update: {
+        data: normalizedDataset.data,
+        summary: normalizedDataset.summary,
+      },
+    });
+
+    await tx.audit.update({
+      where: { id: auditId },
+      data: {
+        status: "VALIDATING",
+        dataSource: "OAUTH",
+      },
+    });
+
+    await tx.platformConnection.update({
+      where: { id: connection.id },
+      data: {
+        adAccountId: (
+          await tx.adAccount.findFirst({ where: { organizationId, platform: "META" } })
+        )?.id || null,
+        externalAccountId: externalAdAccountId,
+        metadata: {
+          externalAdAccountId,
+          lastFetchedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    await tx.auditEvent.create({
+      data: {
+        auditId,
+        type: "OAUTH_DATA_FETCHED",
+        message: "Meta Ads data fetched via OAuth and normalized successfully.",
+        metadata: {
+          platform: "META",
+          externalAdAccountId,
+          summary: normalizedDataset.summary,
+        },
+      },
+    });
+  });
+
+  res.json({
+    status: "success",
+    data: {
+      auditId,
+      platform: "META",
+      summary: normalizedDataset.summary.platforms?.META || {},
+      message: "Meta data fetched and normalized. You can now run the audit.",
+    },
+  });
+};
+
+/**
+ * DELETE /api/platform-connections/:connectionId
+ * Disconnects and removes a platform connection.
+ */
+export const disconnectPlatform = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+
+  const connection = await prisma.platformConnection.findFirst({
+    where: { id: req.params.connectionId, organizationId },
+  });
+
+  if (!connection) throw notFound("Connection not found.");
+
+  await prisma.platformConnection.update({
+    where: { id: connection.id },
+    data: {
+      status: "REVOKED",
+      accessTokenEncrypted: null,
+      refreshTokenEncrypted: null,
+    },
+  });
+
+  res.json({ status: "success", message: "Platform connection disconnected." });
+};

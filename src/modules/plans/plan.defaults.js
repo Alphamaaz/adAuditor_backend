@@ -1,0 +1,98 @@
+export const DEFAULT_SUBSCRIPTION_PLANS = [
+  {
+    name: "Starter",
+    slug: "starter",
+    description:
+      "For small teams validating one ad platform at a time with focused monthly audit volume.",
+    priceCents: 2000,
+    currency: "usd",
+    monthlyAuditLimit: 3,
+    platformLimit: 1,
+    historyDays: 30,
+    features: {
+      pdfExport: true,
+      manualUpload: true,
+      oauthConnections: false,
+      whiteLabelPdf: false,
+      customBranding: false,
+      teamSeats: false,
+      prioritySupport: false,
+      clientAccountLimit: 1,
+      includedPlatforms: ["META", "GOOGLE", "TIKTOK"],
+      // AI narrative: "manual" = user must click "Generate AI report".
+      // Starter pays for AI but doesn't auto-burn tokens on every run.
+      aiNarrative: "manual",
+      notes: [
+        "3 audit runs/month",
+        "1 platform per audit",
+        "Manual AI report",
+        "30-day history",
+      ],
+    },
+    isActive: true,
+  },
+  {
+    name: "Pro",
+    slug: "pro",
+    description:
+      "For agencies and operators running multi-platform audits across active client accounts.",
+    priceCents: 4900,
+    currency: "usd",
+    monthlyAuditLimit: 15,
+    platformLimit: 3,
+    historyDays: 365,
+    features: {
+      pdfExport: true,
+      manualUpload: true,
+      oauthConnections: true,
+      whiteLabelPdf: "planned",
+      customBranding: false,
+      teamSeats: false,
+      prioritySupport: false,
+      clientAccountLimit: null,
+      includedPlatforms: ["META", "GOOGLE", "TIKTOK"],
+      // AI narrative: "automatic" = AI chains after each deterministic run.
+      // Pro users expect a polished report without an extra click.
+      aiNarrative: "automatic",
+      notes: [
+        "15 audit runs/month",
+        "All 3 platforms",
+        "Auto AI report on every run",
+        "12-month history",
+        "API connection availability configurable by plan",
+      ],
+    },
+    isActive: true,
+  },
+  {
+    name: "Agency",
+    slug: "agency",
+    description:
+      "For growing agencies that need higher usage, client account capacity, and priority support.",
+    priceCents: 14900,
+    currency: "usd",
+    monthlyAuditLimit: null,
+    platformLimit: 3,
+    historyDays: null,
+    features: {
+      pdfExport: true,
+      manualUpload: true,
+      oauthConnections: true,
+      whiteLabelPdf: "planned",
+      customBranding: "planned",
+      teamSeats: true,
+      prioritySupport: true,
+      clientAccountLimit: 10,
+      includedPlatforms: ["META", "GOOGLE", "TIKTOK"],
+      aiNarrative: "automatic",
+      notes: [
+        "Unlimited audits",
+        "Up to 10 client accounts",
+        "Auto AI report on every run",
+        "Team seats",
+        "Priority support",
+      ],
+    },
+    isActive: true,
+  },
+];

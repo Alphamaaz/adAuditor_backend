@@ -1,0 +1,501 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum TokenPurpose {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+enum OrganizationRole {
+  OWNER
+  MEMBER
+  VIEWER
+}
+
+enum InternalRole {
+  USER
+  SUPER_ADMIN
+  SUPPORT_ADMIN
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+  PAUSED
+  MANUAL_OVERRIDE
+}
+
+enum Platform {
+  META
+  GOOGLE
+  TIKTOK
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  ERROR
+}
+
+enum AuditStatus {
+  DRAFT
+  INTAKE_IN_PROGRESS
+  WAITING_FOR_DATA
+  VALIDATING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum UploadStatus {
+  PENDING
+  VALIDATED
+  INVALID
+  PROCESSED
+}
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+model User {
+  id                       String                 @id @default(uuid())
+  email                    String                 @unique
+  name                     String?
+  passwordHash             String
+  status                   UserStatus             @default(ACTIVE)
+  internalRole             InternalRole           @default(USER)
+  emailVerifiedAt          DateTime?
+  lastLoginAt              DateTime?
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+
+  memberships              OrganizationMember[]
+  ownedOrganizations       Organization[]         @relation("OrganizationOwner")
+  businessProfiles         BusinessProfile[]
+  auditsCreated            Audit[]                @relation("AuditCreator")
+  recommendationFeedback   RecommendationFeedback[]
+  adminLogs                AdminAuditLog[]        @relation("AdminActor")
+  impersonationSessions    ImpersonationSession[] @relation("ImpersonationAdmin")
+  impersonatedSessions     ImpersonationSession[] @relation("ImpersonationTarget")
+  authSessions             AuthSession[]
+  verificationTokens       VerificationToken[]
+
+  @@index([status])
+  @@index([internalRole])
+}
+
+model AuthSession {
+  id          String    @id @default(uuid())
+  userId      String
+  tokenHash   String    @unique
+  userAgent   String?
+  ipAddress   String?
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model VerificationToken {
+  id        String       @id @default(uuid())
+  userId    String
+  tokenHash String       @unique
+  purpose   TokenPurpose
+  expiresAt DateTime
+  usedAt    DateTime?
+  attempts  Int          @default(0)
+  createdAt DateTime     @default(now())
+
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+}
+
+model Organization {
+  id                     String                 @id @default(uuid())
+  name                   String
+  ownerId                String
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  owner                  User                   @relation("OrganizationOwner", fields: [ownerId], references: [id])
+  members                OrganizationMember[]
+  businessProfile        BusinessProfile?
+  subscription           Subscription?
+  planOverride           PlanOverride?
+  usageCounters          UsageCounter[]
+  adAccounts             AdAccount[]
+  audits                 Audit[]
+  adminLogs              AdminAuditLog[]
+
+  @@index([ownerId])
+}
+
+model OrganizationMember {
+  id             String           @id @default(uuid())
+  userId         String
+  organizationId String
+  role           OrganizationRole @default(OWNER)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId, role])
+}
+
+model BusinessProfile {
+  id             String       @id @default(uuid())
+  userId         String?
+  organizationId String?      @unique
+  answers        Json
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  user           User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model SubscriptionPlan {
+  id                  String         @id @default(uuid())
+  name                String
+  slug                String         @unique
+  description         String?
+  priceCents          Int
+  currency            String         @default("usd")
+  monthlyAuditLimit   Int?
+  platformLimit       Int?
+  historyDays         Int?
+  features            Json?
+  stripePriceId       String?
+  isActive            Boolean        @default(true)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  subscriptions       Subscription[]
+  planOverrides       PlanOverride[]
+
+  @@index([isActive])
+  @@index([stripePriceId])
+}
+
+model Subscription {
+  id                   String             @id @default(uuid())
+  organizationId       String             @unique
+  planId               String?
+  status               SubscriptionStatus @default(TRIALING)
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  organization         Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan                 SubscriptionPlan?  @relation(fields: [planId], references: [id])
+
+  @@index([status])
+}
+
+model PlanOverride {
+  id             String       @id @default(uuid())
+  organizationId String       @unique
+  planId         String?
+  reason         String?
+  expiresAt      DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan           SubscriptionPlan? @relation(fields: [planId], references: [id])
+}
+
+model UsageCounter {
+  id             String       @id @default(uuid())
+  organizationId String
+  periodStart    DateTime
+  periodEnd      DateTime
+  auditsRun      Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, periodStart, periodEnd])
+}
+
+model AdAccount {
+  id             String       @id @default(uuid())
+  organizationId String
+  name           String
+  platform       Platform
+  externalId     String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connections    PlatformConnection[]
+  audits         Audit[]
+
+  @@index([organizationId, platform])
+  @@index([externalId])
+}
+
+model PlatformConnection {
+  id                    String           @id @default(uuid())
+  organizationId         String
+  adAccountId            String?
+  platform              Platform
+  externalAccountId      String?
+  status                ConnectionStatus @default(ACTIVE)
+  accessTokenEncrypted   String?
+  refreshTokenEncrypted  String?
+  tokenExpiresAt         DateTime?
+  scopes                String[]
+  metadata              Json?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  adAccount             AdAccount?       @relation(fields: [adAccountId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, platform])
+  @@index([status])
+}
+
+model Audit {
+  id                         String        @id @default(uuid())
+  organizationId             String
+  adAccountId                String?
+  createdById                String?
+  status                     AuditStatus   @default(DRAFT)
+  selectedPlatforms          Platform[]
+  dataSource                 String?
+  healthScore                Int?
+  categoryScores             Json?
+  businessProfileSnapshot    Json?
+  startedAt                  DateTime?
+  completedAt                DateTime?
+  createdAt                  DateTime      @default(now())
+  updatedAt                  DateTime      @updatedAt
+
+  organization               Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  adAccount                  AdAccount?    @relation(fields: [adAccountId], references: [id], onDelete: SetNull)
+  createdBy                  User?         @relation("AuditCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  intakeResponses            IntakeResponse[]
+  uploadedFiles              UploadedFile[]
+  normalizedDataset          NormalizedDataset?
+  ruleFindings               RuleFinding[]
+  aiReport                   AiReport?
+  memorySummary              AuditMemorySummary?
+  recommendationFeedback     RecommendationFeedback[]
+  pdfReports                 PdfReport[]
+  events                     AuditEvent[]
+
+  @@index([organizationId, status])
+  @@index([createdAt])
+}
+
+model IntakeResponse {
+  id        String   @id @default(uuid())
+  auditId   String
+  section   String
+  answers   Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  audit     Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@unique([auditId, section])
+}
+
+model UploadedFile {
+  id             String       @id @default(uuid())
+  auditId        String
+  platform       Platform
+  reportType     String
+  originalName   String
+  storagePath    String
+  mimeType       String?
+  sizeBytes      Int?
+  status         UploadStatus @default(PENDING)
+  validation     Json?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  audit          Audit        @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@index([auditId, platform])
+}
+
+model NormalizedDataset {
+  id        String   @id @default(uuid())
+  auditId   String   @unique
+  summary   Json?
+  data      Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  audit     Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+}
+
+model RuleFinding {
+  id              String   @id @default(uuid())
+  auditId          String
+  ruleId           String
+  platform         Platform?
+  severity         Severity
+  category         String
+  title            String
+  detail           String?
+  evidence         Json?
+  estimatedImpact  String?
+  fixSteps         Json?
+  createdAt        DateTime @default(now())
+
+  audit            Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@index([auditId, severity])
+  @@index([ruleId])
+}
+
+model AiReport {
+  id        String   @id @default(uuid())
+  auditId   String   @unique
+  provider  String
+  model     String
+  promptMeta Json?
+  output    Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  audit     Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+}
+
+model AuditMemorySummary {
+  id        String   @id @default(uuid())
+  auditId   String   @unique
+  summary   Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  audit     Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+}
+
+model RecommendationFeedback {
+  id               String   @id @default(uuid())
+  auditId          String
+  userId           String
+  recommendationId String?
+  rating           String
+  note             String?
+  createdAt        DateTime @default(now())
+
+  audit            Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([auditId])
+  @@index([userId])
+}
+
+model PdfReport {
+  id          String   @id @default(uuid())
+  auditId     String
+  storagePath String
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+
+  audit       Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@index([auditId])
+}
+
+model AuditEvent {
+  id        String   @id @default(uuid())
+  auditId   String
+  type      String
+  message   String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  audit     Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@index([auditId, createdAt])
+}
+
+model AdminAuditLog {
+  id             String        @id @default(uuid())
+  adminUserId    String
+  organizationId String?
+  action         String
+  targetType     String?
+  targetId       String?
+  metadata       Json?
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime      @default(now())
+
+  adminUser      User          @relation("AdminActor", fields: [adminUserId], references: [id], onDelete: Cascade)
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([adminUserId, createdAt])
+  @@index([organizationId])
+}
+
+model ImpersonationSession {
+  id           String    @id @default(uuid())
+  adminUserId  String
+  targetUserId String
+  reason       String?
+  startedAt    DateTime  @default(now())
+  endedAt      DateTime?
+  ipAddress    String?
+  userAgent    String?
+
+  adminUser    User      @relation("ImpersonationAdmin", fields: [adminUserId], references: [id], onDelete: Cascade)
+  targetUser   User      @relation("ImpersonationTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  @@index([adminUserId, startedAt])
+  @@index([targetUserId, startedAt])
+}
+
+model StripeEvent {
+  id          String   @id @default(uuid())
+  eventId     String   @unique
+  type        String
+  payload     Json
+  processedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([type])
+  @@index([processedAt])
+}
