@@ -158,6 +158,9 @@ export const listOrganizations = async (req, res) => {
         subscription: {
           include: { plan: true },
         },
+        planOverride: {
+          include: { plan: true },
+        },
         _count: {
           select: { members: true, audits: true },
         },
@@ -304,7 +307,7 @@ export const updateOrganizationPlan = async (req, res) => {
 
   if (!plan) throw notFound("Plan not found");
 
-  const override = await prisma.planOverride.upsert({
+  const planOverride = await prisma.planOverride.upsert({
     where: { organizationId },
     update: {
       planId,
@@ -322,7 +325,7 @@ export const updateOrganizationPlan = async (req, res) => {
   res.json({
     status: "success",
     message: `Organization plan overridden to ${plan.name}`,
-    data: override,
+    data: planOverride,
   });
 };
 

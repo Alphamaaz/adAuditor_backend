@@ -63,7 +63,13 @@ const fetchUserWithMemberships = (tx, userId) =>
     include: {
       memberships: {
         include: {
-          organization: { include: { businessProfile: true } },
+          organization: {
+            include: {
+              businessProfile: true,
+              subscription: { include: { plan: true } },
+              planOverride: { include: { plan: true } },
+            },
+          },
         },
       },
     },

@@ -26,11 +26,13 @@ export const serializeAdminOrganization = (org) => ({
   } : null,
   memberCount: org._count?.members,
   auditCount: org._count?.audits,
-  subscription: org.subscription ? {
-    status: org.subscription.status,
-    planName: org.subscription.plan?.name,
-    planSlug: org.subscription.plan?.slug,
-    currentPeriodEnd: org.subscription.currentPeriodEnd,
+  subscription: (org.planOverride?.plan || org.subscription) ? {
+    status: org.planOverride ? "ACTIVE" : (org.subscription?.status || "ACTIVE"),
+    planName: org.planOverride?.plan?.name || org.subscription?.plan?.name,
+    planSlug: org.planOverride?.plan?.slug || org.subscription?.plan?.slug,
+    currentPeriodEnd: org.subscription?.currentPeriodEnd,
+    isOverridden: !!org.planOverride,
+    overrideReason: org.planOverride?.reason,
   } : null,
   createdAt: org.createdAt,
   updatedAt: org.updatedAt,

@@ -25,5 +25,5 @@ export const listOrganizationsSchema = z.object({
 
 export const updateOrganizationPlanSchema = z.object({
   planId: z.string().uuid().nullable(),
-  reason: z.string().trim().min(1).max(500).optional(),
+  reason: z.string().trim().max(500).optional().or(z.literal("")),
 });

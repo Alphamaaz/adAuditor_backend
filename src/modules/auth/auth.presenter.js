@@ -9,13 +9,25 @@ export const serializeUser = (user) => ({
   createdAt: user.createdAt,
 });
 
-export const serializeOrganization = (organization, role) => ({
-  id: organization.id,
-  name: organization.name,
-  role,
-  ownerId: organization.ownerId,
-  createdAt: organization.createdAt,
-});
+export const serializeOrganization = (organization, role) => {
+  const plan = organization.planOverride?.plan || organization.subscription?.plan;
+  const status = organization.planOverride ? "ACTIVE" : (organization.subscription?.status || "ACTIVE");
+
+  return {
+    id: organization.id,
+    name: organization.name,
+    role,
+    ownerId: organization.ownerId,
+    createdAt: organization.createdAt,
+    plan: plan ? {
+      id: plan.id,
+      name: plan.name,
+      slug: plan.slug,
+      status: status,
+      isOverridden: !!organization.planOverride,
+    } : null,
+  };
+};
 
 export const serializeAuthPayload = (user, isImpersonating = false) => {
   const hasBusinessProfile =
