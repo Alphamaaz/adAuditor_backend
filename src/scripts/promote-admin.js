@@ -9,11 +9,14 @@ if (!email) {
 }
 
 async function main() {
+  console.log(`Searching for user: ${email}...`);
+  
   const user = await prisma.user.update({
-    where: { email },
+    where: { email: email },
     data: { internalRole: 'SUPER_ADMIN' },
   });
-  console.log(`Successfully promoted ${user.email} to SUPER_ADMIN`);
+  
+  console.log(`Success! ${user.email} is now a SUPER_ADMIN.`);
 }
 
 main()
