@@ -5,6 +5,7 @@ import { validateBody } from "../../middlewares/validate.js";
 import { createPlanSchema, updatePlanSchema } from "./plan.schemas.js";
 import {
   createPlan,
+  deletePlan,
   getMyPlanAndUsage,
   listAdminPlans,
   listPublicPlans,
@@ -30,3 +31,4 @@ adminPlanRoutes.patch(
   validateBody(updatePlanSchema),
   asyncHandler(updatePlan)
 );
+adminPlanRoutes.delete("/:planId", asyncHandler(deletePlan));

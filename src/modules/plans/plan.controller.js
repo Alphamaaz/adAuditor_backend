@@ -37,9 +37,22 @@ export const listAdminPlans = async (req, res) => {
   });
 };
 
+const generateSlug = (name) => {
+  return name
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/[\s_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+};
+
 export const createPlan = async (req, res) => {
+  const data = { ...req.body };
+  if (!data.slug && data.name) {
+    data.slug = generateSlug(data.name);
+  }
+
   const plan = await prisma.subscriptionPlan.create({
-    data: req.body,
+    data,
   });
 
   res.status(201).json({
@@ -57,14 +70,40 @@ export const updatePlan = async (req, res) => {
     throw notFound("Plan not found");
   }
 
+  const data = { ...req.body };
+  if (data.name && !data.slug) {
+    data.slug = generateSlug(data.name);
+  }
+
   const plan = await prisma.subscriptionPlan.update({
     where: { id: req.params.planId },
-    data: req.body,
+    data,
   });
 
   res.json({
     status: "success",
     data: serializeSubscriptionPlan(plan, { includeStripe: true }),
+  });
+};
+
+export const deletePlan = async (req, res) => {
+  const { planId } = req.params;
+
+  const existingPlan = await prisma.subscriptionPlan.findUnique({
+    where: { id: planId },
+  });
+
+  if (!existingPlan) {
+    throw notFound("Plan not found");
+  }
+
+  await prisma.subscriptionPlan.delete({
+    where: { id: planId },
+  });
+
+  res.json({
+    status: "success",
+    message: "Plan deleted successfully",
   });
 };
 

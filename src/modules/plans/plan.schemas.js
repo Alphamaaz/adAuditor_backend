@@ -20,7 +20,7 @@ const featuresSchema = z.record(z.string(), z.unknown()).optional();
 
 export const createPlanSchema = z.object({
   name: z.string().trim().min(2).max(120),
-  slug: slugSchema,
+  slug: slugSchema.optional(),
   description: z.string().trim().max(500).nullable().optional(),
   priceCents: z.number().int().min(0),
   currency: currencySchema.default("usd"),
