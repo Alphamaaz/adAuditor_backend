@@ -6,21 +6,27 @@ const CLIENT_KEY = () => process.env.TIKTOK_CLIENT_KEY;
 const CLIENT_SECRET = () => process.env.TIKTOK_CLIENT_SECRET;
 
 /**
- * Exchange the auth code for an access token.
+ * Exchange the auth code for an access token using TikTok Login Kit v2.
  */
 export const exchangeCodeForToken = async (code) => {
-  const { data } = await axios.post(`${TIKTOK_API_BASE}/oauth2/access_token/`, {
-    client_id: CLIENT_KEY(),
-    client_secret: CLIENT_SECRET(),
-    code,
-    grant_type: "authorization_code",
+  const params = new URLSearchParams();
+  params.append("client_key", CLIENT_KEY());
+  params.append("client_secret", CLIENT_SECRET());
+  params.append("code", code);
+  params.append("grant_type", "authorization_code");
+  params.append("redirect_uri", process.env.TIKTOK_CALLBACK_URL);
+
+  const { data } = await axios.post("https://open.tiktokapis.com/v2/oauth/token/", params, {
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
   });
 
-  if (data.code !== 0) {
-    throw new Error(`TikTok API Error: ${data.message} (Code: ${data.code})`);
+  if (data.error) {
+    throw new Error(`TikTok Auth Error: ${data.error_description} (${data.error})`);
   }
 
-  return data.data; // { access_token, refresh_token, expires_in, ... }
+  return data; // { access_token, refresh_token, expires_in, open_id, ... }
 };
 
 /**
