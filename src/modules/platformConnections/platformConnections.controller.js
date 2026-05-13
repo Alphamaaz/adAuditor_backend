@@ -24,6 +24,10 @@ import {
   enrichAdsWithStructure,
   buildMetaNormalizedDataset,
 } from "./metaNormalizer.service.js";
+import {
+  exchangeCodeForToken as exchangeTikTokCode,
+  fetchAdAccounts as fetchTikTokAdAccounts,
+} from "./tiktok.service.js";
 
 const META_CALLBACK_URL =
   process.env.META_CALLBACK_URL ||
@@ -148,6 +152,102 @@ export const metaOAuthCallback = async (req, res) => {
     console.error("[Meta OAuth Callback Error]", err.message);
     const errMsg = encodeURIComponent("Failed to complete Meta connection. Please try again.");
     return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${errMsg}&platform=META`);
+  }
+};
+
+// ── TikTok OAuth flow ────────────────────────────────────────────────────────
+
+/**
+ * Step 1: Redirect the user to TikTok's authorization dialog.
+ * GET /api/platform-connections/tiktok/connect
+ */
+export const initTikTokOAuth = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+  const { auditId } = req.query;
+
+  const statePayload = JSON.stringify({ organizationId, auditId: auditId || null });
+  const state = Buffer.from(statePayload).toString("base64url");
+
+  const params = new URLSearchParams({
+    client_key: process.env.TIKTOK_CLIENT_KEY,
+    redirect_uri: process.env.TIKTOK_CALLBACK_URL,
+    state,
+    scope: "user.info.basic,ads.management,ads.readonly",
+    response_type: "code",
+  });
+
+  const authUrl = `https://www.tiktok.com/v2/auth/authorize/?${params.toString()}`;
+  res.redirect(authUrl);
+};
+
+/**
+ * Step 2: TikTok redirects back with a code.
+ */
+export const tikTokOAuthCallback = async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+  const FRONTEND_BASE = process.env.CLIENT_ORIGIN || "http://localhost:3000";
+
+  if (error || !code || !state) {
+    const msg = encodeURIComponent(error_description || "Missing OAuth code");
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${msg}&platform=TIKTOK`);
+  }
+
+  let organizationId;
+  let auditId;
+  try {
+    const decoded = JSON.parse(Buffer.from(state, "base64url").toString());
+    organizationId = decoded.organizationId;
+    auditId = decoded.auditId;
+  } catch {
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=invalid_state&platform=TIKTOK`);
+  }
+
+  try {
+    const tokenData = await exchangeTikTokCode(code);
+    const accessToken = tokenData.access_token;
+    const refreshToken = tokenData.refresh_token;
+    const expiresIn = tokenData.expires_in;
+
+    const encryptedToken = encrypt(accessToken);
+    const encryptedRefresh = refreshToken ? encrypt(refreshToken) : null;
+    const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
+
+    const existingConnection = await prisma.platformConnection.findFirst({
+      where: { organizationId, platform: "TIKTOK" },
+    });
+
+    const connectionData = {
+      status: "ACTIVE",
+      accessTokenEncrypted: encryptedToken,
+      refreshTokenEncrypted: encryptedRefresh,
+      tokenExpiresAt,
+      scopes: tokenData.scope || ["ads.management"],
+      metadata: { open_id: tokenData.open_id },
+    };
+
+    if (existingConnection) {
+      await prisma.platformConnection.update({
+        where: { id: existingConnection.id },
+        data: connectionData,
+      });
+    } else {
+      await prisma.platformConnection.create({
+        data: {
+          ...connectionData,
+          organizationId,
+          platform: "TIKTOK",
+        },
+      });
+    }
+
+    const successUrl = auditId
+      ? `${FRONTEND_BASE}/dashboard/audits/${auditId}/connect?platform=TIKTOK&connected=true`
+      : `${FRONTEND_BASE}/dashboard?platform=TIKTOK&connected=true`;
+
+    return res.redirect(successUrl);
+  } catch (err) {
+    console.error("[TikTok OAuth Callback Error]", err.message);
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=failed_tiktok_connection&platform=TIKTOK`);
   }
 };
 

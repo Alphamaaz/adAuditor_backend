@@ -4,6 +4,8 @@ import { requireAuth } from "../../middlewares/auth.js";
 import {
   initMetaOAuth,
   metaOAuthCallback,
+  initTikTokOAuth,
+  tikTokOAuthCallback,
   listConnections,
   listMetaAdAccounts,
   fetchMetaDataForAudit,
@@ -12,11 +14,14 @@ import {
 
 const router = Router();
 
-// ── Meta OAuth flow (these two are special) ──────────────────────────────────
-// Initiation requires a logged-in user; callback is redirected by Meta so we
-// decode org from the `state` param instead of a session cookie.
+// ── Platform OAuth flows (these are special) ─────────────────────────────────
+// Initiation requires a logged-in user; callback is redirected by platform
+// so we decode org from the `state` param instead of a session cookie.
 router.get("/meta/connect", requireAuth, asyncHandler(initMetaOAuth));
-router.get("/meta/callback", asyncHandler(metaOAuthCallback)); // No requireAuth — comes from Meta
+router.get("/meta/callback", asyncHandler(metaOAuthCallback));
+
+router.get("/tiktok/connect", requireAuth, asyncHandler(initTikTokOAuth));
+router.get("/tiktok/callback", asyncHandler(tikTokOAuthCallback));
 
 // ── Connection management ────────────────────────────────────────────────────
 router.use(requireAuth); // All routes below require auth
