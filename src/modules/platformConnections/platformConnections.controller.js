@@ -172,7 +172,7 @@ export const initTikTokOAuth = async (req, res) => {
     client_key: process.env.TIKTOK_CLIENT_KEY,
     redirect_uri: process.env.TIKTOK_CALLBACK_URL,
     state,
-    scope: "user.info.basic",
+    scope: "user.info.profile",
     response_type: "code",
   });
 
