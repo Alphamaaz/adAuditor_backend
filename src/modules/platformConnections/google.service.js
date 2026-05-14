@@ -25,6 +25,27 @@ const buildHeaders = (accessToken) => {
 };
 
 /**
+ * Extract a human-readable error from a Google Ads API axios error.
+ * Google nests the real message inside error.details[].errors[].message
+ */
+const extractGoogleError = (err) => {
+  const body = err?.response?.data;
+  const status = err?.response?.status;
+
+  console.error(`[Google Ads] HTTP ${status} error from Google API:`);
+  console.error(JSON.stringify(body, null, 2));
+
+  const googleErrors = body?.error?.details?.[0]?.errors;
+  if (googleErrors?.length) {
+    const codes = googleErrors.map((e) => Object.values(e.errorCode || {})[0]).filter(Boolean);
+    const messages = googleErrors.map((e) => e.message).filter(Boolean);
+    return `Google Ads API error [${codes.join(", ")}]: ${messages.join("; ")}`;
+  }
+
+  return body?.error?.message || err.message || "Unknown Google Ads API error";
+};
+
+/**
  * Exchange auth code for access + refresh tokens.
  */
 export const exchangeCodeForToken = async (code) => {
@@ -68,13 +89,17 @@ export const refreshAccessToken = async (refreshToken) => {
  */
 export const fetchAccessibleCustomers = async (accessToken) => {
   console.log("[Google Ads] Fetching accessible customer accounts...");
-  const { data } = await axios.get(
-    `${GOOGLE_ADS_BASE}/customers:listAccessibleCustomers`,
-    { headers: buildHeaders(accessToken) }
-  );
-  const resourceNames = data.resourceNames || [];
-  console.log(`[Google Ads] Found ${resourceNames.length} accessible customer(s):`, resourceNames);
-  return resourceNames;
+  try {
+    const { data } = await axios.get(
+      `${GOOGLE_ADS_BASE}/customers:listAccessibleCustomers`,
+      { headers: buildHeaders(accessToken) }
+    );
+    const resourceNames = data.resourceNames || [];
+    console.log(`[Google Ads] Found ${resourceNames.length} accessible customer(s):`, resourceNames);
+    return resourceNames;
+  } catch (err) {
+    throw new Error(extractGoogleError(err));
+  }
 };
 
 /**
@@ -84,18 +109,22 @@ export const searchGoogleAds = async (accessToken, customerId, query, pageToken 
   const body = { query };
   if (pageToken) body.pageToken = pageToken;
 
-  const { data } = await axios.post(
-    `${GOOGLE_ADS_BASE}/customers/${customerId}/googleAds:search`,
-    body,
-    { headers: buildHeaders(accessToken) }
-  );
+  try {
+    const { data } = await axios.post(
+      `${GOOGLE_ADS_BASE}/customers/${customerId}/googleAds:search`,
+      body,
+      { headers: buildHeaders(accessToken) }
+    );
 
-  const results = data.results || [];
-  if (data.nextPageToken) {
-    const nextResults = await searchGoogleAds(accessToken, customerId, query, data.nextPageToken);
-    return [...results, ...nextResults];
+    const results = data.results || [];
+    if (data.nextPageToken) {
+      const nextResults = await searchGoogleAds(accessToken, customerId, query, data.nextPageToken);
+      return [...results, ...nextResults];
+    }
+    return results;
+  } catch (err) {
+    throw new Error(extractGoogleError(err));
   }
-  return results;
 };
 
 /**
