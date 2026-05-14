@@ -28,6 +28,12 @@ import {
   exchangeCodeForToken as exchangeTikTokCode,
   fetchAdAccounts as fetchTikTokAdAccounts,
 } from "./tiktok.service.js";
+import { exchangeCodeForToken as exchangeGoogleCode } from "./google.service.js";
+
+const GOOGLE_CALLBACK_URL =
+  process.env.GOOGLE_CALLBACK_URL ||
+  "http://localhost:5000/api/platform-connections/google/callback";
+
 
 const META_CALLBACK_URL =
   process.env.META_CALLBACK_URL ||
@@ -482,4 +488,109 @@ export const disconnectPlatform = async (req, res) => {
   });
 
   res.json({ status: "success", message: "Platform connection disconnected." });
+};
+
+// ── Google OAuth flow ────────────────────────────────────────────────────────
+
+/**
+ * Step 1: Redirect the user to Google's authorization dialog.
+ * GET /api/platform-connections/google/connect?auditId=...
+ */
+export const initGoogleOAuth = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+  const { auditId } = req.query;
+
+  const statePayload = JSON.stringify({ organizationId, auditId: auditId || null });
+  const state = Buffer.from(statePayload).toString("base64url");
+
+  const params = new URLSearchParams({
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_CALLBACK_URL,
+    state,
+    scope: "https://www.googleapis.com/auth/adwords",
+    response_type: "code",
+    access_type: "offline",
+    prompt: "consent",
+  });
+
+  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+  res.redirect(authUrl);
+};
+
+/**
+ * Step 2: Google redirects back here with a code.
+ * GET /api/platform-connections/google/callback?code=...&state=...
+ */
+export const googleOAuthCallback = async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+  const FRONTEND_BASE = process.env.CLIENT_ORIGIN || "http://localhost:3000";
+
+  if (error) {
+    const message = encodeURIComponent(error_description || error);
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${message}&platform=GOOGLE`);
+  }
+
+  if (!code || !state) {
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=missing_code&platform=GOOGLE`);
+  }
+
+  let organizationId, auditId;
+  try {
+    const decoded = JSON.parse(Buffer.from(state, "base64url").toString());
+    organizationId = decoded.organizationId;
+    auditId = decoded.auditId;
+  } catch {
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=invalid_state&platform=GOOGLE`);
+  }
+
+  try {
+    const tokenData = await exchangeGoogleCode(code);
+    const accessToken = tokenData.access_token;
+    const refreshToken = tokenData.refresh_token;
+    const expiresIn = tokenData.expires_in || 3600;
+
+    const encryptedToken = encrypt(accessToken);
+    const encryptedRefresh = refreshToken ? encrypt(refreshToken) : null;
+    const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
+
+    const existingConnection = await prisma.platformConnection.findFirst({
+      where: { organizationId, platform: "GOOGLE" },
+    });
+
+    // If refresh token isn't returned (happens if prompt wasn't consent), use the old one
+    const finalRefreshToken = encryptedRefresh || (existingConnection ? existingConnection.refreshTokenEncrypted : null);
+
+    const connectionData = {
+      status: "ACTIVE",
+      accessTokenEncrypted: encryptedToken,
+      refreshTokenEncrypted: finalRefreshToken,
+      tokenExpiresAt,
+      scopes: ["https://www.googleapis.com/auth/adwords"],
+      metadata: {},
+    };
+
+    if (existingConnection) {
+      await prisma.platformConnection.update({
+        where: { id: existingConnection.id },
+        data: connectionData,
+      });
+    } else {
+      await prisma.platformConnection.create({
+        data: {
+          ...connectionData,
+          organizationId,
+          platform: "GOOGLE",
+        },
+      });
+    }
+
+    if (auditId) {
+      res.redirect(`${FRONTEND_BASE}/dashboard/audits/${auditId}/connect?platform=GOOGLE&status=success`);
+    } else {
+      res.redirect(`${FRONTEND_BASE}/dashboard/settings?platform=GOOGLE&status=success`);
+    }
+  } catch (err) {
+    console.error("[Google OAuth Callback Error]", err);
+    res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=server_error&platform=GOOGLE`);
+  }
 };

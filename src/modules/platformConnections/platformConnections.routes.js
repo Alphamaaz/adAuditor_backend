@@ -6,6 +6,8 @@ import {
   metaOAuthCallback,
   initTikTokOAuth,
   tikTokOAuthCallback,
+  initGoogleOAuth,
+  googleOAuthCallback,
   listConnections,
   listMetaAdAccounts,
   fetchMetaDataForAudit,
@@ -22,6 +24,9 @@ router.get("/meta/callback", asyncHandler(metaOAuthCallback));
 
 router.get("/tiktok/connect", requireAuth, asyncHandler(initTikTokOAuth));
 router.get("/tiktok/callback", asyncHandler(tikTokOAuthCallback));
+
+router.get("/google/connect", requireAuth, asyncHandler(initGoogleOAuth));
+router.get("/google/callback", asyncHandler(googleOAuthCallback));
 
 // ── Connection management ────────────────────────────────────────────────────
 router.use(requireAuth); // All routes below require auth
