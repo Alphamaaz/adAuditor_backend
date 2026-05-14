@@ -216,12 +216,17 @@ export const tikTokOAuthCallback = async (req, res) => {
       where: { organizationId, platform: "TIKTOK" },
     });
 
+    const scopeString = tokenData.scope || "";
+    const scopes = scopeString.includes(",") 
+      ? scopeString.split(",").map(s => s.trim())
+      : scopeString.split(" ").map(s => s.trim()).filter(Boolean);
+
     const connectionData = {
       status: "ACTIVE",
       accessTokenEncrypted: encryptedToken,
       refreshTokenEncrypted: encryptedRefresh,
       tokenExpiresAt,
-      scopes: tokenData.scope || ["ads.management"],
+      scopes: scopes.length > 0 ? scopes : ["user.info.profile"],
       metadata: { open_id: tokenData.open_id },
     };
 
