@@ -28,7 +28,21 @@ import {
   exchangeCodeForToken as exchangeTikTokCode,
   fetchAdAccounts as fetchTikTokAdAccounts,
 } from "./tiktok.service.js";
-import { exchangeCodeForToken as exchangeGoogleCode } from "./google.service.js";
+import {
+  exchangeCodeForToken as exchangeGoogleCode,
+  refreshAccessToken as refreshGoogleToken,
+  fetchAccessibleCustomers,
+  fetchCustomerInfo,
+  fetchCampaignsWithMetrics,
+  fetchAdGroupsWithMetrics,
+  fetchAdsWithMetrics,
+} from "./google.service.js";
+import {
+  normalizeCampaigns,
+  normalizeAdGroups,
+  normalizeAds,
+  buildGoogleNormalizedDataset,
+} from "./googleNormalizer.service.js";
 
 const GOOGLE_CALLBACK_URL =
   process.env.GOOGLE_CALLBACK_URL ||
@@ -593,4 +607,243 @@ export const googleOAuthCallback = async (req, res) => {
     console.error("[Google OAuth Callback Error]", err);
     res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=server_error&platform=GOOGLE`);
   }
+};
+
+// ── Google token refresh helper ───────────────────────────────────────────────
+
+/**
+ * Returns a valid (possibly refreshed) access token for the given connection.
+ * If the token expires within 5 minutes, refreshes it and updates DB.
+ */
+const getValidGoogleAccessToken = async (connection) => {
+  const fiveMinutesFromNow = new Date(Date.now() + 5 * 60 * 1000);
+  const isExpired = !connection.tokenExpiresAt || connection.tokenExpiresAt <= fiveMinutesFromNow;
+
+  if (!isExpired) {
+    return decrypt(connection.accessTokenEncrypted);
+  }
+
+  if (!connection.refreshTokenEncrypted) {
+    throw new Error("Google access token expired and no refresh token is available. Please reconnect your Google account.");
+  }
+
+  console.log("[Google Ads] Access token expired — refreshing...");
+  const refreshToken = decrypt(connection.refreshTokenEncrypted);
+  const refreshed = await refreshGoogleToken(refreshToken);
+
+  const newEncryptedToken = encrypt(refreshed.access_token);
+  const newExpiresAt = new Date(Date.now() + (refreshed.expires_in || 3600) * 1000);
+
+  await prisma.platformConnection.update({
+    where: { id: connection.id },
+    data: {
+      accessTokenEncrypted: newEncryptedToken,
+      tokenExpiresAt: newExpiresAt,
+    },
+  });
+
+  console.log("[Google Ads] ✓ Access token refreshed and saved.");
+  return refreshed.access_token;
+};
+
+// ── Google data endpoints ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/platform-connections/google/ad-accounts
+ * Lists all Google Ads customer accounts accessible to the connected user.
+ */
+export const listGoogleAdAccounts = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+
+  const connection = await prisma.platformConnection.findFirst({
+    where: { organizationId, platform: "GOOGLE", status: "ACTIVE" },
+  });
+
+  if (!connection || !connection.accessTokenEncrypted) {
+    throw notFound("No active Google connection found. Please connect your Google Ads account first.");
+  }
+
+  const accessToken = await getValidGoogleAccessToken(connection);
+
+  console.log("[Google Ads] Listing accessible customers for org:", organizationId);
+  const resourceNames = await fetchAccessibleCustomers(accessToken);
+
+  // Extract customer IDs and fetch details in parallel
+  const customerIds = resourceNames.map((r) => r.replace("customers/", ""));
+
+  const customerDetails = await Promise.allSettled(
+    customerIds.map((id) => fetchCustomerInfo(accessToken, id))
+  );
+
+  const accounts = customerIds.map((id, i) => {
+    const result = customerDetails[i];
+    const info = result.status === "fulfilled" ? result.value : null;
+    return {
+      customerId: id,
+      name: info?.descriptiveName || `Account ${id}`,
+      currencyCode: info?.currencyCode || null,
+      timeZone: info?.timeZone || null,
+      status: info?.status || null,
+      isManager: info?.manager || false,
+      resourceName: `customers/${id}`,
+    };
+  });
+
+  console.log(`[Google Ads] ✓ Returning ${accounts.length} account(s).`);
+  res.json({ status: "success", data: accounts });
+};
+
+/**
+ * POST /api/platform-connections/google/fetch-data
+ * Fetches all Google Ads data for an audit and stores it as a NormalizedDataset.
+ * Body: { auditId, customerId }
+ */
+export const fetchGoogleDataForAudit = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+  const { auditId, customerId } = req.body;
+
+  if (!auditId || !customerId) {
+    throw badRequest("auditId and customerId are required.");
+  }
+
+  console.log(`\n[Google Ads] ═══ Starting data fetch ═══`);
+  console.log(`[Google Ads] Org: ${organizationId} | Audit: ${auditId} | Customer: ${customerId}`);
+
+  const [audit, connection] = await Promise.all([
+    prisma.audit.findFirst({
+      where: { id: auditId, organizationId },
+      include: { normalizedDataset: true },
+    }),
+    prisma.platformConnection.findFirst({
+      where: { organizationId, platform: "GOOGLE", status: "ACTIVE" },
+    }),
+  ]);
+
+  if (!audit) throw notFound("Audit not found.");
+  if (!connection || !connection.accessTokenEncrypted) {
+    throw notFound("No active Google connection found. Connect your Google account first.");
+  }
+  if (!audit.selectedPlatforms.includes("GOOGLE")) {
+    throw badRequest("This audit does not include GOOGLE as a selected platform.");
+  }
+
+  const accessToken = await getValidGoogleAccessToken(connection);
+
+  // Fetch customer info for currency
+  const customerInfo = await fetchCustomerInfo(accessToken, customerId);
+  const currency = customerInfo?.currencyCode || null;
+  console.log(`[Google Ads] Account currency: ${currency}`);
+
+  // Fetch all levels in parallel for 30-day window
+  console.log("[Google Ads] Fetching campaigns, ad groups, and ads in parallel...");
+  const [
+    rawCampaigns30d,
+    rawAdGroups30d,
+    rawAds30d,
+    rawCampaigns90d,
+  ] = await Promise.all([
+    fetchCampaignsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
+    fetchAdGroupsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
+    fetchAdsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
+    fetchCampaignsWithMetrics(accessToken, customerId, "LAST_90_DAYS"),
+  ]);
+
+  // Normalize
+  console.log("[Google Ads] Normalizing fetched data...");
+  const campaigns = normalizeCampaigns(rawCampaigns30d);
+  const adGroups = normalizeAdGroups(rawAdGroups30d);
+  const ads = normalizeAds(rawAds30d);
+  const campaigns90d = normalizeCampaigns(rawCampaigns90d);
+
+  console.log(`[Google Ads] Normalized: ${campaigns.length} campaigns, ${adGroups.length} ad groups, ${ads.length} ads`);
+
+  const googleDataset = buildGoogleNormalizedDataset({
+    campaignRecords: campaigns,
+    adGroupRecords: adGroups,
+    adRecords: ads,
+    currency,
+  });
+
+  // Include 90-day campaign data for historical rules
+  googleDataset.data.platforms.GOOGLE.byLevel.campaign_90d = campaigns90d;
+
+  // Merge with existing normalized dataset (preserves other platforms like META)
+  await prisma.$transaction(async (tx) => {
+    const existing = await tx.normalizedDataset.findUnique({ where: { auditId } });
+
+    let mergedData, mergedSummary;
+    if (existing) {
+      const existingData = existing.data;
+      const existingSummary = existing.summary;
+      mergedData = {
+        ...existingData,
+        platforms: {
+          ...(existingData?.platforms || {}),
+          GOOGLE: googleDataset.data.platforms.GOOGLE,
+        },
+      };
+      mergedSummary = {
+        ...existingSummary,
+        platforms: {
+          ...(existingSummary?.platforms || {}),
+          GOOGLE: googleDataset.summary.platforms.GOOGLE,
+        },
+        totals: googleDataset.summary.totals,
+      };
+    } else {
+      mergedData = googleDataset.data;
+      mergedSummary = googleDataset.summary;
+    }
+
+    await tx.normalizedDataset.upsert({
+      where: { auditId },
+      create: { auditId, data: mergedData, summary: mergedSummary },
+      update: { data: mergedData, summary: mergedSummary },
+    });
+
+    await tx.audit.update({
+      where: { id: auditId },
+      data: { status: "VALIDATING", dataSource: "OAUTH" },
+    });
+
+    await tx.platformConnection.update({
+      where: { id: connection.id },
+      data: {
+        externalAccountId: customerId,
+        metadata: {
+          customerId,
+          lastFetchedAt: new Date().toISOString(),
+          currency,
+        },
+      },
+    });
+
+    await tx.auditEvent.create({
+      data: {
+        auditId,
+        type: "OAUTH_DATA_FETCHED",
+        message: "Google Ads data fetched via OAuth and normalized successfully.",
+        metadata: {
+          platform: "GOOGLE",
+          customerId,
+          summary: googleDataset.summary.platforms.GOOGLE,
+        },
+      },
+    });
+  });
+
+  const summaryOut = googleDataset.summary.platforms.GOOGLE;
+  console.log("[Google Ads] ✓ Data stored. Summary:", summaryOut);
+  console.log(`[Google Ads] ═══ Data fetch complete ═══\n`);
+
+  res.json({
+    status: "success",
+    data: {
+      auditId,
+      platform: "GOOGLE",
+      customerId,
+      summary: summaryOut,
+      message: "Google Ads data fetched and normalized. You can now run the audit.",
+    },
+  });
 };

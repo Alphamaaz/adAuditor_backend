@@ -11,6 +11,8 @@ import {
   listConnections,
   listMetaAdAccounts,
   fetchMetaDataForAudit,
+  listGoogleAdAccounts,
+  fetchGoogleDataForAudit,
   disconnectPlatform,
 } from "./platformConnections.controller.js";
 
@@ -34,6 +36,8 @@ router.use(requireAuth); // All routes below require auth
 router.get("/", asyncHandler(listConnections));
 router.get("/meta/ad-accounts", asyncHandler(listMetaAdAccounts));
 router.post("/meta/fetch-data", asyncHandler(fetchMetaDataForAudit));
+router.get("/google/ad-accounts", asyncHandler(listGoogleAdAccounts));
+router.post("/google/fetch-data", asyncHandler(fetchGoogleDataForAudit));
 router.delete("/:connectionId", asyncHandler(disconnectPlatform));
 
 export default router;
