@@ -11,6 +11,8 @@ const getValidatedReportTypes = (uploadedFiles, platform) =>
 
 export const calculateUploadReadiness = (audit) => {
   const selectedPlatforms = audit.selectedPlatforms || [];
+  // OAuth audits fetch all available data via API — no CSV files required.
+  const isOAuth = audit.dataSource !== "MANUAL_UPLOAD";
   const platformReadiness = {};
   let validatedFileCount = 0;
   let requiredCount = 0;
@@ -18,33 +20,50 @@ export const calculateUploadReadiness = (audit) => {
 
   for (const platform of selectedPlatforms) {
     const requiredReports = REQUIRED_UPLOAD_REPORTS[platform] || [];
-    const validatedReportTypes = getValidatedReportTypes(
-      audit.uploadedFiles || [],
-      platform
-    );
-    const uploadedReports = requiredReports.filter((report) =>
-      validatedReportTypes.has(report.id)
-    );
-    const missingReports = requiredReports.filter(
-      (report) => !validatedReportTypes.has(report.id)
-    );
-    const platformValidatedFileCount = (audit.uploadedFiles || []).filter(
-      (file) => file.platform === platform && file.status === "VALIDATED"
-    ).length;
 
-    validatedFileCount += platformValidatedFileCount;
-    requiredCount += requiredReports.length;
-    completedRequiredCount += uploadedReports.length;
+    if (isOAuth) {
+      requiredCount += requiredReports.length;
+      completedRequiredCount += requiredReports.length;
+      validatedFileCount += 1;
 
-    platformReadiness[platform] = {
-      status: missingReports.length === 0 ? "FULL" : "LIMITED",
-      validatedFileCount: platformValidatedFileCount,
-      requiredReports,
-      uploadedReports,
-      missingReports,
-      missingCount: missingReports.length,
-      requiredCount: requiredReports.length,
-    };
+      platformReadiness[platform] = {
+        status: "FULL",
+        validatedFileCount: 1,
+        requiredReports,
+        uploadedReports: requiredReports,
+        missingReports: [],
+        missingCount: 0,
+        requiredCount: requiredReports.length,
+      };
+    } else {
+      const validatedReportTypes = getValidatedReportTypes(
+        audit.uploadedFiles || [],
+        platform
+      );
+      const uploadedReports = requiredReports.filter((report) =>
+        validatedReportTypes.has(report.id)
+      );
+      const missingReports = requiredReports.filter(
+        (report) => !validatedReportTypes.has(report.id)
+      );
+      const platformValidatedFileCount = (audit.uploadedFiles || []).filter(
+        (file) => file.platform === platform && file.status === "VALIDATED"
+      ).length;
+
+      validatedFileCount += platformValidatedFileCount;
+      requiredCount += requiredReports.length;
+      completedRequiredCount += uploadedReports.length;
+
+      platformReadiness[platform] = {
+        status: missingReports.length === 0 ? "FULL" : "LIMITED",
+        validatedFileCount: platformValidatedFileCount,
+        requiredReports,
+        uploadedReports,
+        missingReports,
+        missingCount: missingReports.length,
+        requiredCount: requiredReports.length,
+      };
+    }
   }
 
   const fullAuditReady =

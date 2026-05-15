@@ -1074,12 +1074,12 @@ const buildDeterministicSummary = ({ audit, dataset, findings, scores }) => {
     executiveSummary: [
       `This deterministic audit reviewed ${audit.selectedPlatforms
         .map((platform) => PLATFORM_LABELS[platform])
-        .join(", ")} using validated upload data and intake answers.`,
+        .join(", ")} using ${audit.dataSource !== "MANUAL_UPLOAD" ? "live API data" : "validated upload data"} and intake answers.`,
       audit.uploadReadiness?.mode === "FULL"
-        ? "Upload readiness is full: all required platform reports were validated."
+        ? `Data coverage is complete: all required platform reports were ${audit.dataSource !== "MANUAL_UPLOAD" ? "fetched via OAuth API" : "validated"}.`
         : "Upload readiness is limited: the audit ran with partial data and should be treated as directional until missing reports are uploaded.",
       `The current health score is ${scores.overall}/100. The engine found ${findings.length} issue(s), with ${sortedFindings.filter((finding) => finding.severity === "CRITICAL").length} critical and ${sortedFindings.filter((finding) => finding.severity === "HIGH").length} high-priority item(s).`,
-      `Uploaded data currently covers ${totals.uploadedFiles || 0} file(s), ${totals.rowCount || 0} row(s), and ${Math.round(totals.spend || 0).toLocaleString()} in detected spend.`,
+      `Data covers ${totals.uploadedFiles || 0} source(s), ${totals.rowCount || 0} row(s), and ${Math.round(totals.spend || 0).toLocaleString()} in detected spend.`,
     ],
     topPriorities: sortedFindings.slice(0, 5).map((finding) => ({
       ruleId: finding.ruleId,
