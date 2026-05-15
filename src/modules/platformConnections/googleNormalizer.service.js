@@ -177,7 +177,6 @@ export const normalizePMaxAssets = (rows) =>
     assetName: row.asset?.name || null,
     assetType: row.asset?.type || null,
     fieldType: row.assetGroupAsset?.fieldType || null,
-    performanceLabel: row.assetGroupAsset?.performanceLabel || null,
     status: mapStatus(row.assetGroupAsset?.status),
     adGroupName: row.assetGroup?.name || null,
     adGroupId: row.assetGroup?.id || null,
@@ -193,7 +192,6 @@ export const normalizeShoppingProducts = (rows) =>
     itemId: row.shoppingProduct?.itemId || null,
     title: row.shoppingProduct?.title || null,
     brand: row.shoppingProduct?.brand || null,
-    categoryL1: row.shoppingProduct?.categoryL1 || null,
     status: row.shoppingProduct?.status || null,
     issues: row.shoppingProduct?.issues || [],
   }));
@@ -211,10 +209,6 @@ export const normalizeAudienceBidding = (rows) =>
     adGroupId: row.adGroup?.id || null,
     campaignName: row.campaign?.name || null,
     campaignId: row.campaign?.id || null,
-    spend: microsToDecimal(row.metrics?.costMicros),
-    impressions: parseNumber(row.metrics?.impressions),
-    clicks: parseNumber(row.metrics?.clicks),
-    conversions: parseNumber(row.metrics?.conversions),
   }));
 
 // ── Dataset assembly ─────────────────────────────────────────────────────────

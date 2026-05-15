@@ -388,7 +388,6 @@ export const fetchPMaxAssets = async (accessToken, customerId, loginCustomerId =
   const query = `
     SELECT
       asset_group_asset.field_type,
-      asset_group_asset.performance_label,
       asset_group_asset.status,
       asset.id,
       asset.name,
@@ -406,9 +405,14 @@ export const fetchPMaxAssets = async (accessToken, customerId, loginCustomerId =
       AND asset_group_asset.status != 'REMOVED'
     LIMIT 5000
   `;
-  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
-  console.log(`[Google Ads] ✓ Fetched ${results.length} PMax asset(s).`);
-  return results;
+  try {
+    const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+    console.log(`[Google Ads] ✓ Fetched ${results.length} PMax asset(s).`);
+    return results;
+  } catch (err) {
+    console.warn(`[Google Ads] PMax assets unavailable for customer ${customerId}: ${err.message}`);
+    return [];
+  }
 };
 
 /**
@@ -424,7 +428,6 @@ export const fetchShoppingProducts = async (accessToken, customerId, loginCustom
       shopping_product.item_id,
       shopping_product.title,
       shopping_product.brand,
-      shopping_product.category_l1,
       shopping_product.status,
       shopping_product.issues
     FROM shopping_product
@@ -456,16 +459,10 @@ export const fetchAudienceBidding = async (accessToken, customerId, loginCustome
       ad_group.id,
       ad_group.name,
       campaign.id,
-      campaign.name,
-      metrics.impressions,
-      metrics.clicks,
-      metrics.cost_micros,
-      metrics.conversions
+      campaign.name
     FROM ad_group_criterion
     WHERE ad_group_criterion.type = 'USER_LIST'
       AND ad_group_criterion.status != 'REMOVED'
-      AND segments.date DURING LAST_30_DAYS
-    ORDER BY metrics.cost_micros DESC
     LIMIT 5000
   `;
   const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
