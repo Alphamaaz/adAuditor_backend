@@ -6,7 +6,7 @@ const CALLBACK_URL = () => process.env.GOOGLE_CALLBACK_URL;
 const DEVELOPER_TOKEN = () => process.env.GOOGLE_DEVELOPER_TOKEN;
 const LOGIN_CUSTOMER_ID = () => process.env.GOOGLE_LOGIN_CUSTOMER_ID || null;
 
-const GOOGLE_ADS_VERSION = "v18";
+const GOOGLE_ADS_VERSION = "v22";
 const GOOGLE_ADS_BASE = `https://googleads.googleapis.com/${GOOGLE_ADS_VERSION}`;
 
 const buildHeaders = (accessToken) => {
