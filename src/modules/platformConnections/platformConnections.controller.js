@@ -33,6 +33,7 @@ import {
   refreshAccessToken as refreshGoogleToken,
   fetchAccessibleCustomers,
   fetchCustomerInfo,
+  fetchManagerSubAccounts,
   fetchCampaignsWithMetrics,
   fetchAdGroupsWithMetrics,
   fetchAdsWithMetrics,
@@ -736,17 +737,37 @@ export const fetchGoogleDataForAudit = async (req, res) => {
 
   // Fetch all levels in parallel for 30-day window
   console.log("[Google Ads] Fetching campaigns, ad groups, and ads in parallel...");
-  const [
-    rawCampaigns30d,
-    rawAdGroups30d,
-    rawAds30d,
-    rawCampaigns90d,
-  ] = await Promise.all([
-    fetchCampaignsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
-    fetchAdGroupsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
-    fetchAdsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
-    fetchCampaignsWithMetrics(accessToken, customerId, "LAST_90_DAYS"),
-  ]);
+
+  let rawCampaigns30d, rawAdGroups30d, rawAds30d, rawCampaigns90d;
+
+  if (customerInfo?.manager) {
+    console.log(`[Google Ads] Manager account detected — fetching sub-accounts...`);
+    const subAccounts = await fetchManagerSubAccounts(accessToken, customerId);
+    if (subAccounts.length === 0) {
+      throw badRequest("No active client accounts found under this manager account.");
+    }
+    const subResults = await Promise.all(
+      subAccounts.map((sub) =>
+        Promise.all([
+          fetchCampaignsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
+          fetchAdGroupsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
+          fetchAdsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
+          fetchCampaignsWithMetrics(accessToken, sub.id, "LAST_90_DAYS", customerId),
+        ])
+      )
+    );
+    rawCampaigns30d = subResults.flatMap((r) => r[0]);
+    rawAdGroups30d  = subResults.flatMap((r) => r[1]);
+    rawAds30d       = subResults.flatMap((r) => r[2]);
+    rawCampaigns90d = subResults.flatMap((r) => r[3]);
+  } else {
+    [rawCampaigns30d, rawAdGroups30d, rawAds30d, rawCampaigns90d] = await Promise.all([
+      fetchCampaignsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
+      fetchAdGroupsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
+      fetchAdsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
+      fetchCampaignsWithMetrics(accessToken, customerId, "LAST_90_DAYS"),
+    ]);
+  }
 
   // Normalize
   console.log("[Google Ads] Normalizing fetched data...");

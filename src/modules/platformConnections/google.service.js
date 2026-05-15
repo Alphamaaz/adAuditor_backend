@@ -9,7 +9,18 @@ const LOGIN_CUSTOMER_ID = () => process.env.GOOGLE_LOGIN_CUSTOMER_ID || null;
 const GOOGLE_ADS_VERSION = "v22";
 const GOOGLE_ADS_BASE = `https://googleads.googleapis.com/${GOOGLE_ADS_VERSION}`;
 
-const buildHeaders = (accessToken) => {
+const dateFilter = (dateRange) => {
+  if (dateRange === "LAST_90_DAYS") {
+    const fmt = (d) => d.toISOString().split("T")[0];
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 90);
+    return `segments.date BETWEEN '${fmt(start)}' AND '${fmt(end)}'`;
+  }
+  return `segments.date DURING ${dateRange}`;
+};
+
+const buildHeaders = (accessToken, loginCustomerIdOverride = null) => {
   const devToken = DEVELOPER_TOKEN();
   if (!devToken) {
     throw new Error("GOOGLE_DEVELOPER_TOKEN is not set. Required for Google Ads API calls.");
@@ -19,7 +30,7 @@ const buildHeaders = (accessToken) => {
     "developer-token": devToken,
     "Content-Type": "application/json",
   };
-  const loginId = LOGIN_CUSTOMER_ID();
+  const loginId = loginCustomerIdOverride || LOGIN_CUSTOMER_ID();
   if (loginId) headers["login-customer-id"] = loginId;
   return headers;
 };
@@ -105,7 +116,7 @@ export const fetchAccessibleCustomers = async (accessToken) => {
 /**
  * Execute a GAQL query. Handles pagination automatically.
  */
-export const searchGoogleAds = async (accessToken, customerId, query, pageToken = null) => {
+export const searchGoogleAds = async (accessToken, customerId, query, pageToken = null, loginCustomerId = null) => {
   const body = { query };
   if (pageToken) body.pageToken = pageToken;
 
@@ -113,12 +124,12 @@ export const searchGoogleAds = async (accessToken, customerId, query, pageToken 
     const { data } = await axios.post(
       `${GOOGLE_ADS_BASE}/customers/${customerId}/googleAds:search`,
       body,
-      { headers: buildHeaders(accessToken) }
+      { headers: buildHeaders(accessToken, loginCustomerId) }
     );
 
     const results = data.results || [];
     if (data.nextPageToken) {
-      const nextResults = await searchGoogleAds(accessToken, customerId, query, data.nextPageToken);
+      const nextResults = await searchGoogleAds(accessToken, customerId, query, data.nextPageToken, loginCustomerId);
       return [...results, ...nextResults];
     }
     return results;
@@ -130,7 +141,7 @@ export const searchGoogleAds = async (accessToken, customerId, query, pageToken 
 /**
  * Fetch basic customer/account info (name, currency, timezone).
  */
-export const fetchCustomerInfo = async (accessToken, customerId) => {
+export const fetchCustomerInfo = async (accessToken, customerId, loginCustomerId = null) => {
   console.log(`[Google Ads] Fetching customer info for ${customerId}...`);
   const query = `
     SELECT
@@ -143,17 +154,46 @@ export const fetchCustomerInfo = async (accessToken, customerId) => {
     FROM customer
     LIMIT 1
   `;
-  const results = await searchGoogleAds(accessToken, customerId, query);
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
   const info = results[0]?.customer || null;
   console.log(`[Google Ads] Customer info:`, info);
   return info;
+};
+
+export const fetchManagerSubAccounts = async (accessToken, managerCustomerId) => {
+  console.log(`[Google Ads] Fetching sub-accounts for manager ${managerCustomerId}...`);
+  const query = `
+    SELECT
+      customer_client.client_customer,
+      customer_client.descriptive_name,
+      customer_client.currency_code,
+      customer_client.time_zone,
+      customer_client.manager,
+      customer_client.status,
+      customer_client.level
+    FROM customer_client
+    WHERE customer_client.manager = false
+      AND customer_client.status = 'ENABLED'
+  `;
+  const results = await searchGoogleAds(accessToken, managerCustomerId, query, null, managerCustomerId);
+  const accounts = results.map((r) => {
+    const c = r.customerClient;
+    return {
+      id: c.clientCustomer.split("/")[1],
+      name: c.descriptiveName || null,
+      currencyCode: c.currencyCode,
+      timeZone: c.timeZone,
+    };
+  });
+  console.log(`[Google Ads] Found ${accounts.length} sub-account(s) under manager ${managerCustomerId}.`);
+  return accounts;
 };
 
 /**
  * Fetch campaign-level metrics aggregated over the given date range.
  * dateRange: LAST_30_DAYS | LAST_90_DAYS (GAQL enum)
  */
-export const fetchCampaignsWithMetrics = async (accessToken, customerId, dateRange = "LAST_30_DAYS") => {
+export const fetchCampaignsWithMetrics = async (accessToken, customerId, dateRange = "LAST_30_DAYS", loginCustomerId = null) => {
   console.log(`[Google Ads] Fetching campaigns for customer ${customerId} (${dateRange})...`);
   const query = `
     SELECT
@@ -174,12 +214,12 @@ export const fetchCampaignsWithMetrics = async (accessToken, customerId, dateRan
       metrics.all_conversions_value,
       metrics.view_through_conversions
     FROM campaign
-    WHERE segments.date DURING ${dateRange}
+    WHERE ${dateFilter(dateRange)}
       AND campaign.status != 'REMOVED'
     ORDER BY metrics.cost_micros DESC
     LIMIT 10000
   `;
-  const results = await searchGoogleAds(accessToken, customerId, query);
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
   console.log(`[Google Ads] ✓ Fetched ${results.length} campaign row(s) for ${dateRange}.`);
   return results;
 };
@@ -187,7 +227,7 @@ export const fetchCampaignsWithMetrics = async (accessToken, customerId, dateRan
 /**
  * Fetch ad group-level metrics.
  */
-export const fetchAdGroupsWithMetrics = async (accessToken, customerId, dateRange = "LAST_30_DAYS") => {
+export const fetchAdGroupsWithMetrics = async (accessToken, customerId, dateRange = "LAST_30_DAYS", loginCustomerId = null) => {
   console.log(`[Google Ads] Fetching ad groups for customer ${customerId} (${dateRange})...`);
   const query = `
     SELECT
@@ -205,12 +245,12 @@ export const fetchAdGroupsWithMetrics = async (accessToken, customerId, dateRang
       metrics.conversions,
       metrics.cost_per_conversion
     FROM ad_group
-    WHERE segments.date DURING ${dateRange}
+    WHERE ${dateFilter(dateRange)}
       AND ad_group.status != 'REMOVED'
     ORDER BY metrics.cost_micros DESC
     LIMIT 10000
   `;
-  const results = await searchGoogleAds(accessToken, customerId, query);
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
   console.log(`[Google Ads] ✓ Fetched ${results.length} ad group row(s) for ${dateRange}.`);
   return results;
 };
@@ -218,7 +258,7 @@ export const fetchAdGroupsWithMetrics = async (accessToken, customerId, dateRang
 /**
  * Fetch ad-level metrics.
  */
-export const fetchAdsWithMetrics = async (accessToken, customerId, dateRange = "LAST_30_DAYS") => {
+export const fetchAdsWithMetrics = async (accessToken, customerId, dateRange = "LAST_30_DAYS", loginCustomerId = null) => {
   console.log(`[Google Ads] Fetching ads for customer ${customerId} (${dateRange})...`);
   const query = `
     SELECT
@@ -234,12 +274,12 @@ export const fetchAdsWithMetrics = async (accessToken, customerId, dateRange = "
       metrics.ctr,
       metrics.conversions
     FROM ad_group_ad
-    WHERE segments.date DURING ${dateRange}
+    WHERE ${dateFilter(dateRange)}
       AND ad_group_ad.status != 'REMOVED'
     ORDER BY metrics.cost_micros DESC
     LIMIT 10000
   `;
-  const results = await searchGoogleAds(accessToken, customerId, query);
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
   console.log(`[Google Ads] ✓ Fetched ${results.length} ad row(s) for ${dateRange}.`);
   return results;
 };
