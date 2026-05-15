@@ -37,11 +37,23 @@ import {
   fetchCampaignsWithMetrics,
   fetchAdGroupsWithMetrics,
   fetchAdsWithMetrics,
+  fetchKeywordsWithMetrics,
+  fetchSearchTerms,
+  fetchNegativeKeywordLists,
+  fetchPMaxAssets,
+  fetchShoppingProducts,
+  fetchAudienceBidding,
 } from "./google.service.js";
 import {
   normalizeCampaigns,
   normalizeAdGroups,
   normalizeAds,
+  normalizeKeywords,
+  normalizeSearchTerms,
+  normalizeNegativeKeywordLists,
+  normalizePMaxAssets,
+  normalizeShoppingProducts,
+  normalizeAudienceBidding,
   buildGoogleNormalizedDataset,
 } from "./googleNormalizer.service.js";
 
@@ -735,10 +747,12 @@ export const fetchGoogleDataForAudit = async (req, res) => {
   const currency = customerInfo?.currencyCode || null;
   console.log(`[Google Ads] Account currency: ${currency}`);
 
-  // Fetch all levels in parallel for 30-day window
-  console.log("[Google Ads] Fetching campaigns, ad groups, and ads in parallel...");
+  // Fetch all levels in parallel
+  console.log("[Google Ads] Fetching all report data in parallel...");
 
-  let rawCampaigns30d, rawAdGroups30d, rawAds30d, rawCampaigns90d;
+  let rawCampaigns30d, rawAdGroups30d, rawAds30d, rawCampaigns90d,
+      rawKeywords, rawSearchTerms, rawNegativeLists, rawPMaxAssets,
+      rawShoppingProducts, rawAudienceBidding;
 
   if (customerInfo?.manager) {
     console.log(`[Google Ads] Manager account detected — fetching sub-accounts...`);
@@ -753,35 +767,74 @@ export const fetchGoogleDataForAudit = async (req, res) => {
           fetchAdGroupsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
           fetchAdsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
           fetchCampaignsWithMetrics(accessToken, sub.id, "LAST_90_DAYS", customerId),
+          fetchKeywordsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
+          fetchSearchTerms(accessToken, sub.id, customerId),
+          fetchNegativeKeywordLists(accessToken, sub.id, customerId),
+          fetchPMaxAssets(accessToken, sub.id, customerId),
+          fetchShoppingProducts(accessToken, sub.id, customerId),
+          fetchAudienceBidding(accessToken, sub.id, customerId),
         ])
       )
     );
-    rawCampaigns30d = subResults.flatMap((r) => r[0]);
-    rawAdGroups30d  = subResults.flatMap((r) => r[1]);
-    rawAds30d       = subResults.flatMap((r) => r[2]);
-    rawCampaigns90d = subResults.flatMap((r) => r[3]);
+    rawCampaigns30d      = subResults.flatMap((r) => r[0]);
+    rawAdGroups30d       = subResults.flatMap((r) => r[1]);
+    rawAds30d            = subResults.flatMap((r) => r[2]);
+    rawCampaigns90d      = subResults.flatMap((r) => r[3]);
+    rawKeywords          = subResults.flatMap((r) => r[4]);
+    rawSearchTerms       = subResults.flatMap((r) => r[5]);
+    rawNegativeLists     = subResults.flatMap((r) => r[6]);
+    rawPMaxAssets        = subResults.flatMap((r) => r[7]);
+    rawShoppingProducts  = subResults.flatMap((r) => r[8]);
+    rawAudienceBidding   = subResults.flatMap((r) => r[9]);
   } else {
-    [rawCampaigns30d, rawAdGroups30d, rawAds30d, rawCampaigns90d] = await Promise.all([
+    [
+      rawCampaigns30d, rawAdGroups30d, rawAds30d, rawCampaigns90d,
+      rawKeywords, rawSearchTerms, rawNegativeLists, rawPMaxAssets,
+      rawShoppingProducts, rawAudienceBidding,
+    ] = await Promise.all([
       fetchCampaignsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
       fetchAdGroupsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
       fetchAdsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
       fetchCampaignsWithMetrics(accessToken, customerId, "LAST_90_DAYS"),
+      fetchKeywordsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
+      fetchSearchTerms(accessToken, customerId),
+      fetchNegativeKeywordLists(accessToken, customerId),
+      fetchPMaxAssets(accessToken, customerId),
+      fetchShoppingProducts(accessToken, customerId),
+      fetchAudienceBidding(accessToken, customerId),
     ]);
   }
 
   // Normalize
   console.log("[Google Ads] Normalizing fetched data...");
-  const campaigns = normalizeCampaigns(rawCampaigns30d);
-  const adGroups = normalizeAdGroups(rawAdGroups30d);
-  const ads = normalizeAds(rawAds30d);
-  const campaigns90d = normalizeCampaigns(rawCampaigns90d);
+  const campaigns          = normalizeCampaigns(rawCampaigns30d);
+  const adGroups           = normalizeAdGroups(rawAdGroups30d);
+  const ads                = normalizeAds(rawAds30d);
+  const campaigns90d       = normalizeCampaigns(rawCampaigns90d);
+  const keywords           = normalizeKeywords(rawKeywords);
+  const searchTerms        = normalizeSearchTerms(rawSearchTerms);
+  const negativeLists      = normalizeNegativeKeywordLists(rawNegativeLists);
+  const pmaxAssets         = normalizePMaxAssets(rawPMaxAssets);
+  const shoppingProducts   = normalizeShoppingProducts(rawShoppingProducts);
+  const audienceBidding    = normalizeAudienceBidding(rawAudienceBidding);
 
-  console.log(`[Google Ads] Normalized: ${campaigns.length} campaigns, ${adGroups.length} ad groups, ${ads.length} ads`);
+  console.log(
+    `[Google Ads] Normalized: ${campaigns.length} campaigns, ${adGroups.length} ad groups, ` +
+    `${ads.length} ads, ${keywords.length} keywords, ${searchTerms.length} search terms, ` +
+    `${negativeLists.length} negative lists, ${pmaxAssets.length} PMax assets, ` +
+    `${shoppingProducts.length} shopping products, ${audienceBidding.length} audience criteria`
+  );
 
   const googleDataset = buildGoogleNormalizedDataset({
     campaignRecords: campaigns,
     adGroupRecords: adGroups,
     adRecords: ads,
+    keywordRecords: keywords,
+    searchTermRecords: searchTerms,
+    negativeListRecords: negativeLists,
+    pmaxAssetRecords: pmaxAssets,
+    shoppingProductRecords: shoppingProducts,
+    audienceBiddingRecords: audienceBidding,
     currency,
   });
 

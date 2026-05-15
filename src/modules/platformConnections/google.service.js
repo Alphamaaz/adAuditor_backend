@@ -283,3 +283,192 @@ export const fetchAdsWithMetrics = async (accessToken, customerId, dateRange = "
   console.log(`[Google Ads] ✓ Fetched ${results.length} ad row(s) for ${dateRange}.`);
   return results;
 };
+
+/**
+ * Fetch keyword-level metrics including match type and Quality Score.
+ * Powers KW-007 (broad match share), KW-005 (low QS), and KW-003 (search term waste).
+ */
+export const fetchKeywordsWithMetrics = async (accessToken, customerId, dateRange = "LAST_30_DAYS", loginCustomerId = null) => {
+  console.log(`[Google Ads] Fetching keywords for customer ${customerId} (${dateRange})...`);
+  const query = `
+    SELECT
+      ad_group_criterion.criterion_id,
+      ad_group_criterion.keyword.text,
+      ad_group_criterion.keyword.match_type,
+      ad_group_criterion.status,
+      ad_group_criterion.quality_info.quality_score,
+      ad_group_criterion.effective_cpc_bid_micros,
+      ad_group.id,
+      ad_group.name,
+      campaign.id,
+      campaign.name,
+      campaign.bidding_strategy_type,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.cost_micros,
+      metrics.ctr,
+      metrics.average_cpc,
+      metrics.conversions,
+      metrics.cost_per_conversion
+    FROM keyword_view
+    WHERE ${dateFilter(dateRange)}
+      AND ad_group_criterion.status != 'REMOVED'
+      AND campaign.status != 'REMOVED'
+    ORDER BY metrics.cost_micros DESC
+    LIMIT 10000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} keyword row(s) for ${dateRange}.`);
+  return results;
+};
+
+/**
+ * Fetch search term view — the actual queries users typed that triggered ads.
+ * Restricted to LAST_30_DAYS, the most actionable window for negative keyword work.
+ * Powers KW-003 (high-spend zero-conversion terms).
+ */
+export const fetchSearchTerms = async (accessToken, customerId, loginCustomerId = null) => {
+  console.log(`[Google Ads] Fetching search terms for customer ${customerId}...`);
+  const query = `
+    SELECT
+      search_term_view.search_term,
+      search_term_view.status,
+      ad_group.id,
+      ad_group.name,
+      campaign.id,
+      campaign.name,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.cost_micros,
+      metrics.ctr,
+      metrics.conversions,
+      metrics.cost_per_conversion
+    FROM search_term_view
+    WHERE segments.date DURING LAST_30_DAYS
+      AND campaign.status != 'REMOVED'
+    ORDER BY metrics.cost_micros DESC
+    LIMIT 10000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} search term row(s).`);
+  return results;
+};
+
+/**
+ * Fetch negative keyword shared lists.
+ * member_count and reference_count give the rule engine coverage signals for KW-002.
+ */
+export const fetchNegativeKeywordLists = async (accessToken, customerId, loginCustomerId = null) => {
+  console.log(`[Google Ads] Fetching negative keyword lists for customer ${customerId}...`);
+  const query = `
+    SELECT
+      shared_set.id,
+      shared_set.name,
+      shared_set.type,
+      shared_set.member_count,
+      shared_set.reference_count,
+      shared_set.status
+    FROM shared_set
+    WHERE shared_set.type = 'NEGATIVE_KEYWORDS'
+      AND shared_set.status != 'REMOVED'
+    LIMIT 1000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} negative keyword list(s).`);
+  return results;
+};
+
+/**
+ * Fetch Performance Max asset group assets.
+ * Returns asset type, performance label, and campaign context for PMax asset auditing.
+ * Returns empty array if the account has no PMax campaigns.
+ */
+export const fetchPMaxAssets = async (accessToken, customerId, loginCustomerId = null) => {
+  console.log(`[Google Ads] Fetching PMax assets for customer ${customerId}...`);
+  const query = `
+    SELECT
+      asset_group_asset.field_type,
+      asset_group_asset.performance_label,
+      asset_group_asset.status,
+      asset.id,
+      asset.name,
+      asset.type,
+      asset_group.id,
+      asset_group.name,
+      asset_group.status,
+      campaign.id,
+      campaign.name,
+      campaign.advertising_channel_type
+    FROM asset_group_asset
+    WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      AND campaign.status != 'REMOVED'
+      AND asset_group.status != 'REMOVED'
+      AND asset_group_asset.status != 'REMOVED'
+    LIMIT 5000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} PMax asset(s).`);
+  return results;
+};
+
+/**
+ * Fetch Shopping product feed items from the linked Merchant Center.
+ * Returns product status and issues for feed health auditing.
+ * Returns empty array if the account has no Merchant Center linked — this is not an error.
+ */
+export const fetchShoppingProducts = async (accessToken, customerId, loginCustomerId = null) => {
+  console.log(`[Google Ads] Fetching shopping product feed for customer ${customerId}...`);
+  const query = `
+    SELECT
+      shopping_product.resource_name,
+      shopping_product.item_id,
+      shopping_product.title,
+      shopping_product.brand,
+      shopping_product.category_l1,
+      shopping_product.status,
+      shopping_product.issues
+    FROM shopping_product
+    LIMIT 5000
+  `;
+  try {
+    const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+    console.log(`[Google Ads] ✓ Fetched ${results.length} shopping product(s).`);
+    return results;
+  } catch (err) {
+    console.warn(`[Google Ads] Shopping feed unavailable for customer ${customerId} (no Merchant Center linked): ${err.message}`);
+    return [];
+  }
+};
+
+/**
+ * Fetch audience observation/targeting criteria on ad groups (USER_LIST type).
+ * Returns bid modifiers and performance metrics — powers AUD-006 (audience layer check).
+ */
+export const fetchAudienceBidding = async (accessToken, customerId, loginCustomerId = null) => {
+  console.log(`[Google Ads] Fetching audience bidding criteria for customer ${customerId}...`);
+  const query = `
+    SELECT
+      ad_group_criterion.criterion_id,
+      ad_group_criterion.type,
+      ad_group_criterion.user_list.user_list,
+      ad_group_criterion.bid_modifier,
+      ad_group_criterion.status,
+      ad_group.id,
+      ad_group.name,
+      campaign.id,
+      campaign.name,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.cost_micros,
+      metrics.conversions
+    FROM ad_group_criterion
+    WHERE ad_group_criterion.type = 'USER_LIST'
+      AND ad_group_criterion.status != 'REMOVED'
+      AND segments.date DURING LAST_30_DAYS
+    ORDER BY metrics.cost_micros DESC
+    LIMIT 5000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} audience criterion row(s).`);
+  return results;
+};

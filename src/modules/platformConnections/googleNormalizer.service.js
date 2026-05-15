@@ -112,6 +112,111 @@ export const normalizeAds = (rows) =>
     dateEnd: null,
   }));
 
+// ── Keyword-level ────────────────────────────────────────────────────────────
+
+export const normalizeKeywords = (rows) =>
+  rows.map((row) => ({
+    level: "keyword",
+    criterionId: row.adGroupCriterion?.criterionId || null,
+    keywordText: row.adGroupCriterion?.keyword?.text || null,
+    matchType: row.adGroupCriterion?.keyword?.matchType || null,
+    qualityScore: parseNumber(row.adGroupCriterion?.qualityInfo?.qualityScore),
+    status: mapStatus(row.adGroupCriterion?.status),
+    effectiveCpcBid: microsToDecimal(row.adGroupCriterion?.effectiveCpcBidMicros),
+    adGroupName: row.adGroup?.name || null,
+    adGroupId: row.adGroup?.id || null,
+    campaignName: row.campaign?.name || null,
+    campaignId: row.campaign?.id || null,
+    bidStrategy: row.campaign?.biddingStrategyType || null,
+    spend: microsToDecimal(row.metrics?.costMicros),
+    impressions: parseNumber(row.metrics?.impressions),
+    clicks: parseNumber(row.metrics?.clicks),
+    ctr: parseNumber(row.metrics?.ctr),
+    cpc: microsToDecimal(row.metrics?.averageCpc),
+    conversions: parseNumber(row.metrics?.conversions),
+    cpa: microsToDecimal(row.metrics?.costPerConversion),
+  }));
+
+// ── Search term-level ────────────────────────────────────────────────────────
+
+export const normalizeSearchTerms = (rows) =>
+  rows.map((row) => ({
+    level: "search_term",
+    searchTerm: row.searchTermView?.searchTerm || null,
+    status: row.searchTermView?.status || null,
+    adGroupName: row.adGroup?.name || null,
+    adGroupId: row.adGroup?.id || null,
+    campaignName: row.campaign?.name || null,
+    campaignId: row.campaign?.id || null,
+    spend: microsToDecimal(row.metrics?.costMicros),
+    impressions: parseNumber(row.metrics?.impressions),
+    clicks: parseNumber(row.metrics?.clicks),
+    ctr: parseNumber(row.metrics?.ctr),
+    conversions: parseNumber(row.metrics?.conversions),
+    cpa: microsToDecimal(row.metrics?.costPerConversion),
+  }));
+
+// ── Negative keyword shared lists ────────────────────────────────────────────
+
+export const normalizeNegativeKeywordLists = (rows) =>
+  rows.map((row) => ({
+    level: "negative_list",
+    listId: row.sharedSet?.id || null,
+    name: row.sharedSet?.name || null,
+    memberCount: parseNumber(row.sharedSet?.memberCount),
+    referenceCount: parseNumber(row.sharedSet?.referenceCount),
+    status: row.sharedSet?.status || null,
+  }));
+
+// ── PMax asset group assets ──────────────────────────────────────────────────
+
+export const normalizePMaxAssets = (rows) =>
+  rows.map((row) => ({
+    level: "asset",
+    assetId: row.asset?.id || null,
+    assetName: row.asset?.name || null,
+    assetType: row.asset?.type || null,
+    fieldType: row.assetGroupAsset?.fieldType || null,
+    performanceLabel: row.assetGroupAsset?.performanceLabel || null,
+    status: mapStatus(row.assetGroupAsset?.status),
+    adGroupName: row.assetGroup?.name || null,
+    adGroupId: row.assetGroup?.id || null,
+    campaignName: row.campaign?.name || null,
+    campaignId: row.campaign?.id || null,
+  }));
+
+// ── Shopping product feed ────────────────────────────────────────────────────
+
+export const normalizeShoppingProducts = (rows) =>
+  rows.map((row) => ({
+    level: "feed",
+    itemId: row.shoppingProduct?.itemId || null,
+    title: row.shoppingProduct?.title || null,
+    brand: row.shoppingProduct?.brand || null,
+    categoryL1: row.shoppingProduct?.categoryL1 || null,
+    status: row.shoppingProduct?.status || null,
+    issues: row.shoppingProduct?.issues || [],
+  }));
+
+// ── Audience bidding (ad group user list criteria) ───────────────────────────
+
+export const normalizeAudienceBidding = (rows) =>
+  rows.map((row) => ({
+    level: "audience",
+    criterionId: row.adGroupCriterion?.criterionId || null,
+    userListResourceName: row.adGroupCriterion?.userList?.userList || null,
+    bidModifier: parseNumber(row.adGroupCriterion?.bidModifier),
+    status: mapStatus(row.adGroupCriterion?.status),
+    adGroupName: row.adGroup?.name || null,
+    adGroupId: row.adGroup?.id || null,
+    campaignName: row.campaign?.name || null,
+    campaignId: row.campaign?.id || null,
+    spend: microsToDecimal(row.metrics?.costMicros),
+    impressions: parseNumber(row.metrics?.impressions),
+    clicks: parseNumber(row.metrics?.clicks),
+    conversions: parseNumber(row.metrics?.conversions),
+  }));
+
 // ── Dataset assembly ─────────────────────────────────────────────────────────
 
 const sumField = (records, field) =>
@@ -121,14 +226,36 @@ export const buildGoogleNormalizedDataset = ({
   campaignRecords,
   adGroupRecords,
   adRecords,
+  keywordRecords = [],
+  searchTermRecords = [],
+  negativeListRecords = [],
+  pmaxAssetRecords = [],
+  shoppingProductRecords = [],
+  audienceBiddingRecords = [],
   currency,
 }) => {
-  const allRecords = [...campaignRecords, ...adGroupRecords, ...adRecords];
+  const allRecords = [
+    ...campaignRecords,
+    ...adGroupRecords,
+    ...adRecords,
+    ...keywordRecords,
+    ...searchTermRecords,
+    ...negativeListRecords,
+    ...pmaxAssetRecords,
+    ...shoppingProductRecords,
+    ...audienceBiddingRecords,
+  ];
 
   const byLevel = {
     campaign: campaignRecords,
     adset: adGroupRecords,
     ad: adRecords,
+    keyword: keywordRecords,
+    search_term: searchTermRecords,
+    negative_list: negativeListRecords,
+    asset: pmaxAssetRecords,
+    feed: shoppingProductRecords,
+    audience: audienceBiddingRecords,
   };
 
   const summary = {
