@@ -487,7 +487,9 @@ export const runAudit = async (req, res) => {
     (uploadedFile) => uploadedFile.status === "VALIDATED"
   );
 
-  if (validUploads.length === 0) {
+  // OAUTH audits store data in normalizedDataset (fetched via API) — no
+  // uploaded files required. Only enforce the file check for MANUAL_UPLOAD.
+  if (audit.dataSource === "MANUAL_UPLOAD" && validUploads.length === 0) {
     throw badRequest("No validated upload files are available for this audit.");
   }
 
