@@ -1,3 +1,4 @@
+import axios from "axios";
 import { prisma } from "../../lib/prisma.js";
 import {
   SESSION_COOKIE_NAME,
@@ -26,6 +27,7 @@ import {
   serializeAuthPayload,
   serializeAuthSession,
 } from "./auth.presenter.js";
+
 
 // Session helpers
 
@@ -260,6 +262,11 @@ export const login = async (req, res) => {
     },
   });
 
+  // Google-only accounts have no password — give a helpful message.
+  if (user && !user.passwordHash) {
+    throw unauthorized("This account uses Google Sign-In. Please continue with Google.");
+  }
+
   const isValidPassword =
     user && (await verifyPassword(password, user.passwordHash));
 
@@ -380,6 +387,10 @@ export const changePassword = async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   const user = req.user;
 
+  if (!user.passwordHash) {
+    throw badRequest("Your account uses Google Sign-In and does not have a password.");
+  }
+
   const isValid = await verifyPassword(currentPassword, user.passwordHash);
   if (!isValid) {
     throw badRequest("Current password is incorrect.");
@@ -474,5 +485,93 @@ export const revokeOtherSessions = async (req, res) => {
     data: {
       revokedCount: result.count,
     },
+  });
+};
+
+export const googleAuth = async (req, res) => {
+  const { accessToken } = req.body;
+
+  // Verify the access token by calling Google's userinfo endpoint.
+  let googleUser;
+  try {
+    const { data } = await axios.get(
+      "https://www.googleapis.com/oauth2/v3/userinfo",
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    googleUser = data;
+  } catch {
+    throw unauthorized("Invalid Google token. Please try again.");
+  }
+
+  const { sub: googleId, email, name, email_verified: emailVerified } = googleUser;
+
+  if (!emailVerified) {
+    throw badRequest("Your Google account email is not verified.");
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    // Find by googleId first, fall back to email to link existing accounts.
+    let user = await tx.user.findFirst({
+      where: { OR: [{ googleId }, { email }] },
+    });
+
+    if (user?.status === "SUSPENDED") {
+      throw forbidden("Your account has been suspended. Please contact support.");
+    }
+
+    if (!user) {
+      // Brand new user — create account, org, and trial subscription.
+      user = await tx.user.create({
+        data: {
+          email,
+          name: name || email.split("@")[0],
+          googleId,
+          status: "ACTIVE",
+          emailVerifiedAt: new Date(),
+        },
+      });
+
+      const organization = await tx.organization.create({
+        data: {
+          name: `${name || email}'s Organization`,
+          ownerId: user.id,
+        },
+      });
+
+      await tx.organizationMember.create({
+        data: { userId: user.id, organizationId: organization.id, role: "OWNER" },
+      });
+
+      await tx.subscription.create({
+        data: { organizationId: organization.id, status: "TRIALING" },
+      });
+    } else if (!user.googleId) {
+      // Existing email/password user — link their Google account.
+      user = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          googleId,
+          emailVerifiedAt: user.emailVerifiedAt ?? new Date(),
+          // If they were PENDING (unverified), Google has now verified their email.
+          status: user.status === "PENDING" ? "ACTIVE" : user.status,
+        },
+      });
+    }
+
+    await tx.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date() },
+    });
+
+    const token = await createSession(tx, req, user.id);
+    const fullUser = await fetchUserWithMemberships(tx, user.id);
+    return { token, user: fullUser };
+  });
+
+  setSessionCookie(res, result.token);
+
+  res.json({
+    status: "success",
+    data: serializeAuthPayload(result.user),
   });
 };

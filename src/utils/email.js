@@ -1,7 +1,7 @@
-import nodemailer from "nodemailer";
+﻿import nodemailer from "nodemailer";
 
 const FROM_ADDRESS =
-  process.env.SMTP_FROM || "AdAuditor Pro <noreply@adauditorpro.com>";
+  process.env.SMTP_FROM || "Ad Adviser <noreply@adauditorpro.com>";
 
 const createTransport = () => {
   if (!process.env.SMTP_HOST) return null;
@@ -32,12 +32,12 @@ const send = async ({ to, subject, text, html }) => {
 export const sendVerificationEmail = (email, otp) =>
   send({
     to: email,
-    subject: "Verify your AdAuditor Pro account",
+    subject: "Verify your Ad Adviser account",
     text: `Your verification code is: ${otp}\n\nThis code expires in 15 minutes. Do not share it with anyone.`,
     html: `
       <div style="font-family:sans-serif;max-width:480px">
         <h2>Verify your email</h2>
-        <p>Use the code below to verify your AdAuditor Pro account.</p>
+        <p>Use the code below to verify your Ad Adviser account.</p>
         <div style="font-size:32px;font-weight:bold;letter-spacing:8px;margin:24px 0">${otp}</div>
         <p style="color:#666">This code expires in <strong>15 minutes</strong>. Do not share it with anyone.</p>
       </div>
@@ -47,12 +47,12 @@ export const sendVerificationEmail = (email, otp) =>
 export const sendPasswordResetEmail = (email, otp) =>
   send({
     to: email,
-    subject: "Reset your AdAuditor Pro password",
+    subject: "Reset your Ad Adviser password",
     text: `Your password reset code is: ${otp}\n\nThis code expires in 15 minutes. If you did not request this, ignore this email.`,
     html: `
       <div style="font-family:sans-serif;max-width:480px">
         <h2>Reset your password</h2>
-        <p>Use the code below to reset your AdAuditor Pro password.</p>
+        <p>Use the code below to reset your Ad Adviser password.</p>
         <div style="font-size:32px;font-weight:bold;letter-spacing:8px;margin:24px 0">${otp}</div>
         <p style="color:#666">This code expires in <strong>15 minutes</strong>.</p>
         <p style="color:#666">If you did not request a password reset, you can safely ignore this email.</p>

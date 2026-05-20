@@ -1,4 +1,4 @@
-import { serviceUnavailable } from "../../utils/appError.js";
+﻿import { serviceUnavailable } from "../../utils/appError.js";
 import { aiReportJsonSchema } from "./aiReport.schema.js";
 
 const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions";
@@ -117,7 +117,7 @@ const generateDeepSeekAuditReport = async ({ context }) => {
           {
             role: "system",
             content:
-              "You are AdAuditor Pro's report writer. You must output json only. Use only the supplied deterministic audit context. Do not invent metrics, dates, spend, CPA, ROAS, or platform facts.",
+              "You are Ad Adviser's report writer. You must output json only. Use only the supplied deterministic audit context. Do not invent metrics, dates, spend, CPA, ROAS, or platform facts.",
           },
           {
             role: "user",
@@ -185,7 +185,7 @@ const generateGeminiAuditReport = async ({ context }) => {
           systemInstruction: {
             parts: [
               {
-                text: "You are AdAuditor Pro's report writer. Use only the supplied deterministic audit context. Do not invent metrics, dates, spend, CPA, ROAS, or platform facts. If data is limited, disclose reduced confidence. Keep recommendations specific, practical, and client-ready.",
+                text: "You are Ad Adviser's report writer. Use only the supplied deterministic audit context. Do not invent metrics, dates, spend, CPA, ROAS, or platform facts. If data is limited, disclose reduced confidence. Keep recommendations specific, practical, and client-ready.",
               },
             ],
           },
@@ -261,7 +261,7 @@ const generateOpenAiAuditReport = async ({ context }) => {
           {
             role: "system",
             content:
-              "You are AdAuditor Pro's report writer. Use only the supplied deterministic audit context. Do not invent metrics, dates, spend, CPA, ROAS, or platform facts. If data is limited, disclose reduced confidence. Keep recommendations specific, practical, and client-ready.",
+              "You are Ad Adviser's report writer. Use only the supplied deterministic audit context. Do not invent metrics, dates, spend, CPA, ROAS, or platform facts. If data is limited, disclose reduced confidence. Keep recommendations specific, practical, and client-ready.",
           },
           {
             role: "user",

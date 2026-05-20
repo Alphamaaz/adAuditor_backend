@@ -12,6 +12,7 @@ import {
   resetPasswordSchema,
   changePasswordSchema,
   updateProfileSchema,
+  googleAuthSchema,
 } from "./auth.schemas.js";
 import {
   signup,
@@ -26,6 +27,7 @@ import {
   updateProfile,
   listSessions,
   revokeOtherSessions,
+  googleAuth,
 } from "./auth.controller.js";
 
 const router = Router();
@@ -56,6 +58,12 @@ router.post(
   asyncHandler(login)
 );
 router.post("/logout", asyncHandler(logout));
+router.post(
+  "/google",
+  authRateLimit,
+  validateBody(googleAuthSchema),
+  asyncHandler(googleAuth)
+);
 router.post(
   "/forgot-password",
   otpRateLimit,

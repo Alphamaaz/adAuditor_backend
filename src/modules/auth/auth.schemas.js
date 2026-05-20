@@ -57,6 +57,10 @@ export const changePasswordSchema = z
     path: ["newPassword"],
   });
 
+export const googleAuthSchema = z.object({
+  accessToken: z.string().min(1, "Google access token is required."),
+});
+
 export const updateProfileSchema = z
   .object({
     name: z.string().trim().min(1).max(120).optional(),
