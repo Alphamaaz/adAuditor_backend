@@ -4,11 +4,12 @@ services:
     build:
       context: ../adAuditor_frontend
       dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=https://api.adadviser.uk
+        - NEXT_PUBLIC_GOOGLE_CLIENT_ID=${NEXT_PUBLIC_GOOGLE_CLIENT_ID}
     restart: always
     ports:
       - "3050:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=https://api.adadviser.uk
     networks:
       - app-network
 
