@@ -242,24 +242,71 @@ const parseCsvLine = (line) => {
   return values;
 };
 
+// Decode buffer handling UTF-16 LE/BE BOMs (Google Ads exports) and UTF-8 BOM.
+const decodeBuffer = (buffer) => {
+  // UTF-16 LE: BOM is FF FE
+  if (buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return buffer.toString("utf16le").replace(/^﻿/, "");
+  }
+  // UTF-16 BE: BOM is FE FF
+  if (buffer[0] === 0xfe && buffer[1] === 0xff) {
+    const swapped = Buffer.alloc(buffer.length);
+    for (let i = 0; i < buffer.length - 1; i += 2) {
+      swapped[i] = buffer[i + 1];
+      swapped[i + 1] = buffer[i];
+    }
+    return swapped.toString("utf16le").replace(/^﻿/, "");
+  }
+  // UTF-8 BOM: EF BB BF
+  return buffer.toString("utf8").replace(/^﻿/, "");
+};
+
 const parseCsv = (buffer) => {
-  const content = buffer.toString("utf8").replace(/^﻿/, "");
-  const lines = content
+  const content = decodeBuffer(buffer);
+
+  const allLines = content
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
     .filter(Boolean);
 
+  if (allLines.length === 0) return [];
+
+  // Detect delimiter: Google Ads uses tabs, most others use commas.
+  const sampleLine = allLines.find((l) => l.includes("\t") || l.includes(",")) ?? allLines[0];
+  const useTab = (sampleLine.match(/\t/g) ?? []).length >= (sampleLine.match(/,/g) ?? []).length;
+  const splitLine = useTab
+    ? (line) => line.split("\t").map((v) => v.trim())
+    : parseCsvLine;
+
+  // Skip metadata title rows at the top (e.g. "Campaign report", "All time").
+  // The real header is the first line that has more than 3 columns.
+  let headerIndex = 0;
+  for (let i = 0; i < Math.min(5, allLines.length); i++) {
+    if (splitLine(allLines[i]).length > 3) {
+      headerIndex = i;
+      break;
+    }
+  }
+
+  const lines = allLines.slice(headerIndex);
   if (lines.length === 0) return [];
 
-  const headers = parseCsvLine(lines[0]);
+  const headers = splitLine(lines[0]);
 
-  return lines.slice(1).map((line) => {
-    const values = parseCsvLine(line);
-    return headers.reduce((row, header, index) => {
-      row[header] = values[index] ?? "";
-      return row;
-    }, {});
-  });
+  return lines
+    .slice(1)
+    .filter((line) => {
+      // Drop Google Ads "Total: Campaigns / Account / Video / …" summary rows.
+      const firstCell = splitLine(line)[0] ?? "";
+      return !firstCell.trim().startsWith("Total:");
+    })
+    .map((line) => {
+      const values = splitLine(line);
+      return headers.reduce((row, header, index) => {
+        row[header] = values[index] ?? "";
+        return row;
+      }, {});
+    });
 };
 
 const parseRows = async (filePath, originalName) => {

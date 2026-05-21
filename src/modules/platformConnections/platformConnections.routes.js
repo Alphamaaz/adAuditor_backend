@@ -11,6 +11,8 @@ import {
   listConnections,
   listMetaAdAccounts,
   fetchMetaDataForAudit,
+  listTikTokAdAccounts,
+  fetchTikTokDataForAudit,
   listGoogleAdAccounts,
   fetchGoogleDataForAudit,
   disconnectPlatform,
@@ -36,6 +38,8 @@ router.use(requireAuth); // All routes below require auth
 router.get("/", asyncHandler(listConnections));
 router.get("/meta/ad-accounts", asyncHandler(listMetaAdAccounts));
 router.post("/meta/fetch-data", asyncHandler(fetchMetaDataForAudit));
+router.get("/tiktok/ad-accounts", asyncHandler(listTikTokAdAccounts));
+router.post("/tiktok/fetch-data", asyncHandler(fetchTikTokDataForAudit));
 router.get("/google/ad-accounts", asyncHandler(listGoogleAdAccounts));
 router.post("/google/fetch-data", asyncHandler(fetchGoogleDataForAudit));
 router.delete("/:connectionId", asyncHandler(disconnectPlatform));

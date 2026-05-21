@@ -26,8 +26,17 @@ import {
 } from "./metaNormalizer.service.js";
 import {
   exchangeCodeForToken as exchangeTikTokCode,
-  fetchAdAccounts as fetchTikTokAdAccounts,
+  fetchAdvertiserList as fetchTikTokAdvertiserList,
+  fetchCampaignReport as fetchTikTokCampaigns,
+  fetchAdGroupReport as fetchTikTokAdGroups,
+  fetchAdReport as fetchTikTokAds,
 } from "./tiktok.service.js";
+import {
+  normalizeCampaigns as normalizeTikTokCampaigns,
+  normalizeAdGroups as normalizeTikTokAdGroups,
+  normalizeAds as normalizeTikTokAds,
+  buildTikTokNormalizedDataset,
+} from "./tiktokNormalizer.service.js";
 import {
   exchangeCodeForToken as exchangeGoogleCode,
   refreshAccessToken as refreshGoogleToken,
@@ -202,14 +211,13 @@ export const initTikTokOAuth = async (req, res) => {
   const state = Buffer.from(statePayload).toString("base64url");
 
   const params = new URLSearchParams({
-    client_key: process.env.TIKTOK_CLIENT_KEY,
-    redirect_uri: process.env.TIKTOK_CALLBACK_URL,
+    app_id: process.env.TIKTOK_APP_ID,
     state,
-    scope: "user.info.profile",
-    response_type: "code",
+    redirect_uri: process.env.TIKTOK_CALLBACK_URL,
   });
 
-  const authUrl = `https://www.tiktok.com/v2/auth/authorize/?${params.toString()}`;
+  // TikTok Business API authorization URL (not the Login Kit URL)
+  const authUrl = `https://business-api.tiktok.com/portal/auth?${params.toString()}`;
   res.redirect(authUrl);
 };
 
@@ -217,11 +225,12 @@ export const initTikTokOAuth = async (req, res) => {
  * Step 2: TikTok redirects back with a code.
  */
 export const tikTokOAuthCallback = async (req, res) => {
-  const { code, state, error, error_description } = req.query;
+  // TikTok Business API sends auth_code (not code)
+  const { auth_code, state, error, error_description } = req.query;
   const FRONTEND_BASE = process.env.CLIENT_ORIGIN || "http://localhost:3000";
 
-  if (error || !code || !state) {
-    const msg = encodeURIComponent(error_description || "Missing OAuth code");
+  if (error || !auth_code || !state) {
+    const msg = encodeURIComponent(error_description || "Missing OAuth auth_code");
     return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${msg}&platform=TIKTOK`);
   }
 
@@ -236,31 +245,27 @@ export const tikTokOAuthCallback = async (req, res) => {
   }
 
   try {
-    const tokenData = await exchangeTikTokCode(code);
+    // Business API token exchange — no refresh token, token is session-based
+    const tokenData = await exchangeTikTokCode(auth_code);
     const accessToken = tokenData.access_token;
-    const refreshToken = tokenData.refresh_token;
-    const expiresIn = tokenData.expires_in;
+    const advertiserIds = tokenData.advertiser_ids || [];
+    const scopes = Array.isArray(tokenData.scope)
+      ? tokenData.scope
+      : (tokenData.scope || "").split(",").map((s) => s.trim()).filter(Boolean);
 
     const encryptedToken = encrypt(accessToken);
-    const encryptedRefresh = refreshToken ? encrypt(refreshToken) : null;
-    const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
 
     const existingConnection = await prisma.platformConnection.findFirst({
       where: { organizationId, platform: "TIKTOK" },
     });
 
-    const scopeString = tokenData.scope || "";
-    const scopes = scopeString.includes(",") 
-      ? scopeString.split(",").map(s => s.trim())
-      : scopeString.split(" ").map(s => s.trim()).filter(Boolean);
-
     const connectionData = {
       status: "ACTIVE",
       accessTokenEncrypted: encryptedToken,
-      refreshTokenEncrypted: encryptedRefresh,
-      tokenExpiresAt,
-      scopes: scopes.length > 0 ? scopes : ["user.info.profile"],
-      metadata: { open_id: tokenData.open_id },
+      refreshTokenEncrypted: null,
+      tokenExpiresAt: null, // Business API tokens don't expire like Login Kit
+      scopes: scopes.length > 0 ? scopes : ["ad_account_management"],
+      metadata: { advertiser_ids: advertiserIds },
     };
 
     if (existingConnection) {
@@ -270,11 +275,7 @@ export const tikTokOAuthCallback = async (req, res) => {
       });
     } else {
       await prisma.platformConnection.create({
-        data: {
-          ...connectionData,
-          organizationId,
-          platform: "TIKTOK",
-        },
+        data: { ...connectionData, organizationId, platform: "TIKTOK" },
       });
     }
 
@@ -285,8 +286,176 @@ export const tikTokOAuthCallback = async (req, res) => {
     return res.redirect(successUrl);
   } catch (err) {
     console.error("[TikTok OAuth Callback Error]", err.message);
-    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=failed_tiktok_connection&platform=TIKTOK`);
+    const msg = encodeURIComponent("Failed to complete TikTok connection. Please try again.");
+    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${msg}&platform=TIKTOK`);
   }
+};
+
+// ── TikTok data endpoints ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/platform-connections/tiktok/ad-accounts
+ * Lists the TikTok advertiser accounts the connected user has access to.
+ */
+export const listTikTokAdAccounts = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+
+  const connection = await prisma.platformConnection.findFirst({
+    where: { organizationId, platform: "TIKTOK", status: "ACTIVE" },
+  });
+
+  if (!connection || !connection.accessTokenEncrypted) {
+    throw notFound("No active TikTok connection found. Please connect your TikTok account first.");
+  }
+
+  const accessToken = decrypt(connection.accessTokenEncrypted);
+  const advertisers = await fetchTikTokAdvertiserList(accessToken);
+
+  res.json({
+    status: "success",
+    data: advertisers.map((a) => ({
+      advertiserId: String(a.advertiser_id),
+      name: a.advertiser_name || String(a.advertiser_id),
+      currency: a.currency || null,
+      timezone: a.timezone || null,
+    })),
+  });
+};
+
+/**
+ * POST /api/platform-connections/tiktok/fetch-data
+ * Fetches all TikTok Ads data for an audit and stores it as a NormalizedDataset.
+ * Body: { auditId, advertiserId }
+ */
+export const fetchTikTokDataForAudit = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+  const { auditId, advertiserId } = req.body;
+
+  if (!auditId || !advertiserId) {
+    throw badRequest("auditId and advertiserId are required.");
+  }
+
+  console.log(`\n[TikTok Ads] ═══ Starting data fetch ═══`);
+  console.log(`[TikTok Ads] Org: ${organizationId} | Audit: ${auditId} | Advertiser: ${advertiserId}`);
+
+  const [audit, connection] = await Promise.all([
+    prisma.audit.findFirst({
+      where: { id: auditId, organizationId },
+      include: { normalizedDataset: true },
+    }),
+    prisma.platformConnection.findFirst({
+      where: { organizationId, platform: "TIKTOK", status: "ACTIVE" },
+    }),
+  ]);
+
+  if (!audit) throw notFound("Audit not found.");
+  if (!connection || !connection.accessTokenEncrypted) {
+    throw notFound("No active TikTok connection found. Connect your TikTok account first.");
+  }
+  if (!audit.selectedPlatforms.includes("TIKTOK")) {
+    throw badRequest("This audit does not include TIKTOK as a selected platform.");
+  }
+
+  const accessToken = decrypt(connection.accessTokenEncrypted);
+
+  console.log("[TikTok Ads] Fetching campaigns, ad groups, and ads in parallel...");
+  const [rawCampaigns30d, rawAdGroups30d, rawAds30d, rawCampaigns90d] = await Promise.all([
+    fetchTikTokCampaigns(accessToken, advertiserId, 30),
+    fetchTikTokAdGroups(accessToken, advertiserId, 30),
+    fetchTikTokAds(accessToken, advertiserId, 30),
+    fetchTikTokCampaigns(accessToken, advertiserId, 90),
+  ]);
+
+  console.log("[TikTok Ads] Normalizing data...");
+  const campaigns = normalizeTikTokCampaigns(rawCampaigns30d);
+  const adGroups = normalizeTikTokAdGroups(rawAdGroups30d);
+  const ads = normalizeTikTokAds(rawAds30d);
+  const campaigns90d = normalizeTikTokCampaigns(rawCampaigns90d);
+
+  console.log(
+    `[TikTok Ads] Normalized: ${campaigns.length} campaigns, ${adGroups.length} ad groups, ${ads.length} ads`
+  );
+
+  // Find the advertiser's currency from the advertiser list
+  let currency = null;
+  try {
+    const advertisers = await fetchTikTokAdvertiserList(accessToken);
+    const advertiser = advertisers.find((a) => String(a.advertiser_id) === String(advertiserId));
+    currency = advertiser?.currency || null;
+  } catch {
+    // currency stays null — non-critical
+  }
+
+  const tiktokDataset = buildTikTokNormalizedDataset({ campaignRecords: campaigns, adGroupRecords: adGroups, adRecords: ads, currency });
+  tiktokDataset.data.platforms.TIKTOK.byLevel.campaign_90d = campaigns90d;
+
+  await prisma.$transaction(async (tx) => {
+    const existing = await tx.normalizedDataset.findUnique({ where: { auditId } });
+
+    let mergedData, mergedSummary;
+    if (existing) {
+      mergedData = {
+        ...existing.data,
+        platforms: { ...(existing.data?.platforms || {}), TIKTOK: tiktokDataset.data.platforms.TIKTOK },
+      };
+      mergedSummary = {
+        ...existing.summary,
+        platforms: { ...(existing.summary?.platforms || {}), TIKTOK: tiktokDataset.summary.platforms.TIKTOK },
+        totals: tiktokDataset.summary.totals,
+      };
+    } else {
+      mergedData = tiktokDataset.data;
+      mergedSummary = tiktokDataset.summary;
+    }
+
+    await tx.normalizedDataset.upsert({
+      where: { auditId },
+      create: { auditId, data: mergedData, summary: mergedSummary },
+      update: { data: mergedData, summary: mergedSummary },
+    });
+
+    await tx.audit.update({
+      where: { id: auditId },
+      data: { status: "VALIDATING", dataSource: "OAUTH" },
+    });
+
+    await tx.platformConnection.update({
+      where: { id: connection.id },
+      data: {
+        externalAccountId: String(advertiserId),
+        metadata: {
+          ...(connection.metadata || {}),
+          advertiserId: String(advertiserId),
+          lastFetchedAt: new Date().toISOString(),
+          currency,
+        },
+      },
+    });
+
+    await tx.auditEvent.create({
+      data: {
+        auditId,
+        type: "OAUTH_DATA_FETCHED",
+        message: "TikTok Ads data fetched via OAuth and normalized successfully.",
+        metadata: { platform: "TIKTOK", advertiserId, summary: tiktokDataset.summary.platforms.TIKTOK },
+      },
+    });
+  });
+
+  const summaryOut = tiktokDataset.summary.platforms.TIKTOK;
+  console.log("[TikTok Ads] ✓ Data stored. Summary:", summaryOut);
+  console.log(`[TikTok Ads] ═══ Data fetch complete ═══\n`);
+
+  res.json({
+    status: "success",
+    data: {
+      auditId,
+      platform: "TIKTOK",
+      advertiserId,
+      summary: summaryOut,
+      message: "TikTok Ads data fetched and normalized. You can now run the audit.",
+    },
+  });
 };
 
 // ── Connection management ────────────────────────────────────────────────────
