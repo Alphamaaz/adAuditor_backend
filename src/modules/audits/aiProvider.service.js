@@ -1,4 +1,4 @@
-﻿import { serviceUnavailable } from "../../utils/appError.js";
+import { serviceUnavailable } from "../../utils/appError.js";
 import { aiReportJsonSchema } from "./aiReport.schema.js";
 
 const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions";
@@ -52,45 +52,124 @@ const parseGeminiResponseText = (responseBody) =>
     .filter(Boolean)
     .join("\n");
 
-const buildAiReportJsonInstructions = () => `
-Return only valid JSON matching this exact shape:
+// ── Prompt builders ───────────────────────────────────────────────────────────
+
+const buildSystemPrompt = () =>
+  `You are a senior paid media strategist and audit writer at Ad Adviser, a professional advertising account audit service. You have personally audited hundreds of ad accounts spending $5,000 to $10,000,000 per month across Meta, Google Ads, and TikTok for over a decade.
+
+Clients pay for your audit reports because you tell them exactly what is costing them money — with specific dollar amounts — and exactly what to do about it, ranked by financial impact. Your reports are never generic. Every sentence is grounded in the client's actual data.
+
+WRITING RULES — follow these without exception:
+
+1. DOLLAR SPECIFICITY: Every problem you describe MUST include the specific dollar amount, percentage, or metric from ruleFindings evidence or normalizedSummary. Never write about a performance issue without its dollar cost. "Your campaigns wasted $4,280" beats "spend efficiency is suboptimal" every time.
+
+2. GOAL-REFERENCED FRAMING: Always compare performance against the client's declared goals in businessProfileSnapshot.sectionA. If targetCpa is $50 and actual CPA is $148, write "$148 actual CPA — 3× your $50 target." If targetRoas is 4.0 and estimated ROAS is 1.2, write "1.2× estimated ROAS against your 4.0× target — you are getting back $0.30 for every $1 spent." Never describe underperformance without anchoring it to their declared goal.
+
+3. IMPACT RANKING: Rank all priorities strictly by estimated dollar waste or revenue impact, not by severity label alone. A $12,000/month waste issue at MEDIUM severity must be ranked above a $150/month issue at CRITICAL. Always explain why a finding is the top priority in dollar terms.
+
+4. EXPERT TONE: Write for a sophisticated advertiser who manages their own agency or in-house media team. Skip beginner-level explanations. Go straight to the diagnosis, the mechanism, and the action. Use the language of paid media professionals: "ad set learning phase", "broad match bleed", "pixel event mismatch", "CAPI signal loss", "search term irrelevance waste" — not "your ads may not be optimized."
+
+5. DIRECTNESS: Never use "it appears", "it seems", "you may want to consider", "it might be worth", "could potentially", or "seems like". State conclusions directly. "Your pixel is not firing on the checkout page" — not "it appears there may be a tracking issue."
+
+6. BUSINESS MODEL MATCHING: Match language to the declared business type in businessProfileSnapshot.sectionA.businessType. eCommerce accounts → frame everything in ROAS, revenue, and purchase CPA. Lead Gen → CPA per lead and lead volume. App Install → CPI and install rate. B2B SaaS → cost per qualified lead and pipeline value. Local → cost per contact and geographic efficiency.
+
+7. TRACKING AWARENESS: If tracking issues exist (findings BP-TRK-001, BP-TRK-002, BP-TRK-003, or BP-TRK-004), state immediately that all CPA and ROAS figures in this audit are unreliable until these are resolved. Don't analyze ROAS data as if it's trustworthy when the underlying tracking is broken.
+
+8. NO INVENTION: Never invent campaign names, dollar figures, CPAs, ROASes, CTRs, conversion counts, dates, or any metrics. Use ONLY what appears in the supplied audit context JSON. If a metric is not in the context, do not mention it.
+
+9. PRIOR AUDIT CONTEXT: If priorAudits contains data, reference it explicitly: "Your CPA has worsened from $X in your [date] audit to $Y now — a Z% deterioration." If it shows improvement, say so. Trend context is highly valuable to the client.`;
+
+const buildUserPrompt = (context) => {
+  const bp = context?.audit?.businessProfileSnapshot?.sectionA || {};
+  const totals = context?.normalizedSummary?.totals || {};
+  const healthScore = context?.audit?.healthScore ?? "N/A";
+  const platforms = (context?.audit?.selectedPlatforms || []).join(", ");
+  const hasPriorAudits = (context?.priorAudits || []).length > 0;
+
+  const contextHints = [
+    bp.targetCpa ? `• Declared target CPA: $${bp.targetCpa}` : "• Target CPA: not declared (use industry benchmarks)",
+    bp.targetRoas ? `• Declared target ROAS: ${bp.targetRoas}×` : "• Target ROAS: not declared",
+    bp.monthlyBudget ? `• Declared monthly budget: $${bp.monthlyBudget.toLocaleString()}` : "• Monthly budget: not declared",
+    bp.businessType ? `• Business type: ${bp.businessType}` : "• Business type: not declared",
+    bp.avgOrderValue ? `• Avg order value: $${bp.avgOrderValue}` : null,
+    bp.blendedCac ? `• Blended CAC: $${bp.blendedCac}` : null,
+    totals.spend ? `• Total spend in audit data: $${Math.round(totals.spend).toLocaleString()}` : null,
+    totals.conversions ? `• Total conversions in audit data: ${totals.conversions}` : null,
+    `• Overall health score: ${healthScore}/100`,
+    `• Platforms audited: ${platforms}`,
+    hasPriorAudits ? `• Prior audit data available: YES — reference trends explicitly` : "• Prior audit data: none",
+  ].filter(Boolean).join("\n");
+
+  return `Write the AI narrative for this paid advertising audit. Return ONLY valid JSON — no markdown, no preamble, no explanation outside the JSON.
+
+KEY ACCOUNT FACTS (extracted for quick reference — all values also in the full context below):
+${contextHints}
+
+REQUIRED JSON OUTPUT:
+
 {
-  "executiveSummary": ["paragraph 1", "paragraph 2"],
+  "executiveSummary": ["paragraph 1", "paragraph 2", "optional paragraph 3"],
   "topPriorities": [
     {
-      "ruleId": "RULE-ID-FROM-CONTEXT",
-      "platform": "META",
-      "severity": "HIGH",
-      "title": "Short title",
-      "estimatedImpact": "Impact using only supplied facts",
-      "recommendedAction": "Specific action"
+      "ruleId": "only IDs from ruleFindings",
+      "platform": "META|GOOGLE|TIKTOK",
+      "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+      "title": "concise title",
+      "estimatedImpact": "must quote the specific dollar figure from that finding's evidence",
+      "recommendedAction": "one specific instruction, starts with a verb"
     }
   ],
   "quickWins": [
     {
-      "ruleId": "RULE-ID-FROM-CONTEXT",
-      "platform": "META",
-      "title": "Short title",
-      "fixSteps": ["Step 1"]
+      "ruleId": "only IDs from ruleFindings",
+      "platform": "META|GOOGLE|TIKTOK",
+      "title": "concise title",
+      "fixSteps": ["step 1", "step 2"]
     }
   ],
-  "confidenceNotes": ["State if upload readiness is limited."],
+  "confidenceNotes": ["note 1", "note 2"],
   "clientReadyRecommendations": [
     {
-      "headline": "Client-ready headline",
-      "explanation": "Explanation based only on supplied rule findings.",
-      "nextSteps": ["Step 1"],
+      "headline": "punchy, action-oriented headline",
+      "explanation": "2-3 sentences with specific numbers from the findings",
+      "nextSteps": ["specific step 1", "specific step 2"],
       "sourceRuleIds": ["RULE-ID-FROM-CONTEXT"]
     }
   ]
 }
-Rules:
-- Use only rule IDs present in ruleFindings.
-- Do not invent metrics, dates, spend, CPA, ROAS, CTR, conversion counts, or platform facts.
-- If uploadReadiness.mode is LIMITED, include that limitation in confidenceNotes.
-- Keep executiveSummary to 2-3 paragraphs.
-- Keep topPriorities and quickWins to at most 5 items each.
-`;
+
+SECTION-BY-SECTION INSTRUCTIONS:
+
+executiveSummary (2 required, 3rd optional):
+• Para 1: Lead with the health score and what it signals. Quote the total spend reviewed ($${Math.round(totals.spend || 0).toLocaleString()}). Name the single most expensive problem with its exact dollar waste from the findings — do not bury the lead.
+• Para 2: Connect performance to declared goals. If BP-PERF-001 exists in ruleFindings, state the CPA gap in dollar and multiple terms using the evidence numbers. If BP-PERF-002 exists, state the ROAS shortfall. If any BP-TRK findings exist, warn that data reliability is compromised and CPA/ROAS figures cannot be fully trusted until tracking is fixed.${hasPriorAudits ? "\n• Para 3: Reference prior audit data to show whether performance is improving or deteriorating. Quote the specific metric change." : "\n• Para 3 (optional): Prognosis — what fixing the top 3 findings would recover mechanically (e.g. 'eliminating the $X in zero-conversion spend and fixing UTM tracking would improve attributable ROAS within 2-4 weeks')."}
+
+topPriorities (max 5, ranked by dollar impact, not severity label):
+• Only ruleIds that appear in ruleFindings
+• estimatedImpact: copy the dollar figure directly from that finding's estimatedImpact field or evidence.wastedSpend / evidence.lossMakingSpend — do not rephrase without numbers
+• recommendedAction: one specific action starting with a verb — "Pause the 3 zero-conversion campaigns identified in STR-009", not "Review campaign performance"
+
+quickWins (max 5, prefer MEDIUM/LOW severity findings):
+• Actions a media buyer can complete in under 1 hour with no budget risk
+• fixSteps: make them account-specific — reference the platform and what specifically needs to be done
+
+confidenceNotes:
+• If uploadReadiness.mode is "LIMITED": start with "This audit ran with partial data. Missing: [list from uploadReadiness]. Treat findings as directional."
+• If BP-TRK-001 or BP-TRK-002 exists in ruleFindings: "Conversion tracking issues detected. CPA and ROAS figures in this report are unreliable until pixel and conversion event configuration is corrected."
+• If businessProfileSnapshot lacks targetCpa AND targetRoas: "No performance targets declared. CPA and ROAS analysis uses industry benchmarks rather than client-specific goals. Audit accuracy improves when targets are set in profile settings."
+• If all data is complete and tracking looks clean: "Data coverage and tracking configuration are sufficient for a high-confidence audit."
+
+clientReadyRecommendations (3 to 5 items — written for the client to hand to their agency):
+• headline: short, direct, action-oriented — a sentence the client can put in a Slack message to their agency
+• explanation: 2-3 sentences with specific numbers — "Your Google account has 4 campaigns that spent $6,200 in the audit period with zero recorded conversions. This is direct, recoverable waste."
+• nextSteps: specific enough that a media buyer receiving this brief knows exactly what to do without needing to run their own analysis
+• sourceRuleIds: only rule IDs from ruleFindings
+
+FULL AUDIT CONTEXT JSON:
+${JSON.stringify(context)}`;
+};
+
+// ── Provider implementations ──────────────────────────────────────────────────
 
 const generateDeepSeekAuditReport = async ({ context }) => {
   const config = getDeepSeekConfig();
@@ -116,12 +195,11 @@ const generateDeepSeekAuditReport = async ({ context }) => {
         messages: [
           {
             role: "system",
-            content:
-              "You are Ad Adviser's report writer. You must output json only. Use only the supplied deterministic audit context. Do not invent metrics, dates, spend, CPA, ROAS, or platform facts.",
+            content: buildSystemPrompt(),
           },
           {
             role: "user",
-            content: `${buildAiReportJsonInstructions()}\n\nAudit context JSON:\n${JSON.stringify(context)}`,
+            content: buildUserPrompt(context),
           },
         ],
         response_format: {
@@ -183,20 +261,12 @@ const generateGeminiAuditReport = async ({ context }) => {
         },
         body: JSON.stringify({
           systemInstruction: {
-            parts: [
-              {
-                text: "You are Ad Adviser's report writer. Use only the supplied deterministic audit context. Do not invent metrics, dates, spend, CPA, ROAS, or platform facts. If data is limited, disclose reduced confidence. Keep recommendations specific, practical, and client-ready.",
-              },
-            ],
+            parts: [{ text: buildSystemPrompt() }],
           },
           contents: [
             {
               role: "user",
-              parts: [
-                {
-                  text: `${buildAiReportJsonInstructions()}\n\nAudit context JSON:\n${JSON.stringify(context)}`,
-                },
-              ],
+              parts: [{ text: buildUserPrompt(context) }],
             },
           ],
           generationConfig: {
@@ -260,12 +330,11 @@ const generateOpenAiAuditReport = async ({ context }) => {
         input: [
           {
             role: "system",
-            content:
-              "You are Ad Adviser's report writer. Use only the supplied deterministic audit context. Do not invent metrics, dates, spend, CPA, ROAS, or platform facts. If data is limited, disclose reduced confidence. Keep recommendations specific, practical, and client-ready.",
+            content: buildSystemPrompt(),
           },
           {
             role: "user",
-            content: JSON.stringify(context),
+            content: buildUserPrompt(context),
           },
         ],
         text: {

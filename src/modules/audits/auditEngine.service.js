@@ -47,6 +47,58 @@ const PLATFORM_LABELS = {
   TIKTOK: "TikTok",
 };
 
+const INDUSTRY_BENCHMARKS = {
+  ctr: {
+    META: {
+      eCommerce:     { good: 1.5, warning: 0.8, danger: 0.4 },
+      "Lead Gen":    { good: 1.2, warning: 0.6, danger: 0.3 },
+      "App Install": { good: 1.8, warning: 1.0, danger: 0.5 },
+      Local:         { good: 1.0, warning: 0.5, danger: 0.25 },
+      "B2B SaaS":    { good: 0.8, warning: 0.4, danger: 0.2 },
+      Other:         { good: 1.0, warning: 0.5, danger: 0.25 },
+    },
+    GOOGLE: {
+      eCommerce:     { good: 5.0, warning: 2.5, danger: 1.0 },
+      "Lead Gen":    { good: 4.5, warning: 2.0, danger: 0.8 },
+      "App Install": { good: 3.5, warning: 1.5, danger: 0.6 },
+      Local:         { good: 5.5, warning: 2.5, danger: 1.0 },
+      "B2B SaaS":    { good: 3.5, warning: 1.5, danger: 0.6 },
+      Other:         { good: 4.0, warning: 2.0, danger: 0.8 },
+    },
+    TIKTOK: {
+      eCommerce:     { good: 1.5, warning: 0.7, danger: 0.3 },
+      "Lead Gen":    { good: 1.2, warning: 0.6, danger: 0.25 },
+      "App Install": { good: 2.0, warning: 1.0, danger: 0.4 },
+      Local:         { good: 1.0, warning: 0.5, danger: 0.2 },
+      "B2B SaaS":    { good: 0.8, warning: 0.4, danger: 0.2 },
+      Other:         { good: 1.0, warning: 0.5, danger: 0.2 },
+    },
+  },
+  cpm: {
+    META: {
+      eCommerce:     { good: 15, warning: 28, danger: 45 },
+      "Lead Gen":    { good: 12, warning: 22, danger: 38 },
+      "App Install": { good: 10, warning: 20, danger: 35 },
+      Local:         { good: 8,  warning: 18, danger: 30 },
+      "B2B SaaS":    { good: 20, warning: 38, danger: 60 },
+      Other:         { good: 12, warning: 25, danger: 40 },
+    },
+    TIKTOK: {
+      eCommerce:     { good: 8,  warning: 18, danger: 30 },
+      "Lead Gen":    { good: 7,  warning: 15, danger: 25 },
+      "App Install": { good: 6,  warning: 14, danger: 22 },
+      Local:         { good: 5,  warning: 12, danger: 20 },
+      "B2B SaaS":    { good: 10, warning: 20, danger: 35 },
+      Other:         { good: 7,  warning: 15, danger: 25 },
+    },
+  },
+};
+
+const getBenchmark = (metric, platform, businessType) =>
+  INDUSTRY_BENCHMARKS[metric]?.[platform]?.[businessType] ||
+  INDUSTRY_BENCHMARKS[metric]?.[platform]?.Other ||
+  null;
+
 const toArray = (value) => (Array.isArray(value) ? value : value ? [value] : []);
 
 const text = (value) => String(value || "").toLowerCase();
@@ -54,6 +106,15 @@ const text = (value) => String(value || "").toLowerCase();
 const includesAny = (value, terms) => {
   const values = toArray(value).map(text);
   return terms.some((term) => values.some((valueItem) => valueItem.includes(term)));
+};
+
+// Word-boundary match — prevents "Do not know".includes("no") false positives.
+// Use this instead of .includes("no") or includesAny([..., "no", ...]).
+const matchesWord = (value, terms) => {
+  const values = toArray(value).map(text);
+  return terms.some((term) =>
+    values.some((v) => new RegExp(`\\b${term}\\b`, "i").test(v))
+  );
 };
 
 const numberValue = (value) => {
@@ -159,6 +220,28 @@ const getPlatformSummary = (dataset, platform) =>
     reach: 0,
   };
 
+const getTrackingCategory = (platform) =>
+  ({ META: "Tracking & Pixel Health", GOOGLE: "Conversion Tracking Setup", TIKTOK: "Pixel & Tracking Health" })[platform] ||
+  "Attribution & Reporting";
+
+const getBiddingCategory = (platform) =>
+  ({ META: "Bidding & Budget", GOOGLE: "Bidding Strategy Alignment", TIKTOK: "Bidding & Budget" })[platform] ||
+  "Bidding & Budget";
+
+const getAttributionCategory = (platform) =>
+  ({ META: "Attribution & Reporting", GOOGLE: "Audience & Attribution", TIKTOK: "Attribution & Reporting" })[platform] ||
+  "Attribution & Reporting";
+
+const getBusinessProfile = (audit) => {
+  const snapshot = audit.businessProfileSnapshot;
+  if (!snapshot) return null;
+  return {
+    sectionA: snapshot.sectionA || {},
+    sectionB: snapshot.sectionB || {},
+    sectionC: snapshot.sectionC || {},
+  };
+};
+
 const createFinding = ({
   ruleId,
   platform,
@@ -203,7 +286,7 @@ const addMetaFindings = ({ audit, dataset, findings }) => {
     return;
   }
 
-  if (text(answers.M6).includes("no") || text(answers.M6).includes("unsure")) {
+  if (matchesWord(answers.M6, ["no"]) || text(answers.M6).includes("unsure")) {
     findings.push(
       createFinding({
         ruleId: "AUD-001",
@@ -223,7 +306,7 @@ const addMetaFindings = ({ audit, dataset, findings }) => {
     );
   }
 
-  if (text(answers.M5).startsWith("no")) {
+  if (matchesWord(answers.M5, ["no"])) {
     findings.push(
       createFinding({
         ruleId: "AUD-003",
@@ -412,6 +495,7 @@ const addMetaFindings = ({ audit, dataset, findings }) => {
       ].some((value) => text(value).includes("below average"))
     );
     if (belowAverage.length / ads.length >= 0.25) {
+      const belowAverageSpend = sumSpend(belowAverage);
       findings.push(
         createFinding({
           ruleId: "CRE-003",
@@ -427,8 +511,9 @@ const addMetaFindings = ({ audit, dataset, findings }) => {
             belowAverageShare: Number(
               ((belowAverage.length / ads.length) * 100).toFixed(1)
             ),
+            spendOnBelowAverageAds: Math.round(belowAverageSpend),
           },
-          estimatedImpact: "Higher CPMs and weaker reach efficiency.",
+          estimatedImpact: `$${Math.round(belowAverageSpend).toLocaleString()} in spend is on below-average ranked ads. Replacing them with higher-quality creative reduces CPM and improves delivery competitiveness.`,
           fixSteps: [
             "Pause ads with multiple below-average rankings.",
             "Iterate on hooks, formats, and visual quality for retained creative.",
@@ -437,6 +522,126 @@ const addMetaFindings = ({ audit, dataset, findings }) => {
         })
       );
     }
+  }
+
+  // STR-008: Active campaigns spending with zero results — direct budget waste
+  const totalMetaCampaignSpend = sumSpend(campaigns);
+  if (campaigns.length >= 2 && totalMetaCampaignSpend > 0) {
+    const minThreshold = Math.max(30, totalMetaCampaignSpend * 0.01);
+    const zeroResult = campaigns.filter((record) => {
+      const recordSpend = numberValue(record.spend);
+      const recordResults = numberValue(record.results ?? record.conversions);
+      return (
+        recordSpend >= minThreshold &&
+        recordResults === 0 &&
+        !isPausedStatus(record.status)
+      );
+    });
+    const zeroResultSpend = sumSpend(zeroResult);
+    if (zeroResult.length > 0 && zeroResultSpend / totalMetaCampaignSpend >= 0.1) {
+      findings.push(
+        createFinding({
+          ruleId: "STR-008",
+          platform: "META",
+          severity: zeroResultSpend / totalMetaCampaignSpend >= 0.3 ? "CRITICAL" : "HIGH",
+          category: "Campaign Structure",
+          title: "Active Meta campaigns are spending with zero recorded results",
+          detail: `${zeroResult.length} active campaign(s) consumed $${Math.round(zeroResultSpend).toLocaleString()} without recording a single result. These campaigns are burning budget with no measured return.`,
+          evidence: {
+            zeroResultCampaigns: zeroResult.length,
+            wastedSpend: Math.round(zeroResultSpend),
+            wastedSharePercent: Number(
+              ((zeroResultSpend / totalMetaCampaignSpend) * 100).toFixed(1)
+            ),
+            examples: zeroResult
+              .slice(0, 3)
+              .map((r) => ({ name: r.name, spend: Math.round(numberValue(r.spend)) })),
+          },
+          estimatedImpact: `$${Math.round(zeroResultSpend).toLocaleString()} in spend produced zero recorded results. Pausing or restructuring these campaigns directly recovers this budget.`,
+          fixSteps: [
+            "Check whether the conversion event is correctly configured for each zero-result campaign.",
+            "Review whether the campaign objective matches how you measure results.",
+            "If the campaigns have been running more than 2 weeks with zero results, pause and restructure.",
+            "Verify tracking is firing correctly — zero results can indicate a tracking break, not just poor performance.",
+          ],
+        })
+      );
+    }
+  }
+
+  // BID-005: Campaigns reporting ROAS < 1.0 — spend exceeds reported revenue
+  const campaignsWithRoas = campaigns.filter(
+    (record) => numberValue(record.roas) > 0 && numberValue(record.spend) > 50
+  );
+  if (campaignsWithRoas.length >= 1) {
+    const lossMakers = campaignsWithRoas.filter(
+      (record) => numberValue(record.roas) < 1.0
+    );
+    const lossMakersSpend = sumSpend(lossMakers);
+    if (lossMakers.length > 0) {
+      findings.push(
+        createFinding({
+          ruleId: "BID-005",
+          platform: "META",
+          severity:
+            lossMakers.length >= campaignsWithRoas.length * 0.5 ? "CRITICAL" : "HIGH",
+          category: "Bidding & Budget",
+          title: "Meta campaigns reporting ROAS below 1.0 — spend exceeds attributed revenue",
+          detail: `${lossMakers.length} campaign(s) with ROAS data are reporting ROAS below 1.0, meaning Meta attributes less than $1 in revenue for every $1 spent. Total spend on these campaigns: $${Math.round(lossMakersSpend).toLocaleString()}.`,
+          evidence: {
+            lossMakingCampaigns: lossMakers.length,
+            totalCampaignsWithRoas: campaignsWithRoas.length,
+            lossMakingSpend: Math.round(lossMakersSpend),
+            examples: lossMakers.slice(0, 3).map((r) => ({
+              name: r.name,
+              roas: numberValue(r.roas).toFixed(2),
+              spend: Math.round(numberValue(r.spend)),
+            })),
+          },
+          estimatedImpact: `$${Math.round(lossMakersSpend).toLocaleString()} is flowing into campaigns where reported revenue is lower than cost. Note: Meta attribution often overcounts — real losses may be greater.`,
+          fixSteps: [
+            "Immediately reduce budgets on loss-making campaigns.",
+            "Cross-reference Meta ROAS with GA4 or your analytics tool — Meta frequently overcounts conversions.",
+            "Review offer, landing page, and audience on each loss-making campaign.",
+            "Redirect budget from loss-makers to profitable campaigns.",
+          ],
+        })
+      );
+    }
+  }
+
+  // AUD-010: Ad-set level frequency above 7 — audience fatigue burning budget
+  const highFreqAdSets = adsets.filter(
+    (record) => numberValue(record.frequency) > 7 && numberValue(record.spend) > 30
+  );
+  if (highFreqAdSets.length > 0) {
+    const highFreqSpend = sumSpend(highFreqAdSets);
+    findings.push(
+      createFinding({
+        ruleId: "AUD-010",
+        platform: "META",
+        severity: "HIGH",
+        category: "Audience Strategy",
+        title: "Multiple Meta ad sets have very high frequency — audience fatigue is likely",
+        detail: `${highFreqAdSets.length} ad set(s) have frequency above 7, meaning the average person has seen ads more than 7 times. At this level CPMs rise and conversion rates typically drop sharply.`,
+        evidence: {
+          highFreqAdSets: highFreqAdSets.length,
+          highFreqSpend: Math.round(highFreqSpend),
+          examples: highFreqAdSets.slice(0, 3).map((r) => ({
+            name: r.name,
+            frequency: numberValue(r.frequency).toFixed(1),
+            spend: Math.round(numberValue(r.spend)),
+          })),
+        },
+        estimatedImpact: `$${Math.round(highFreqSpend).toLocaleString()} is on saturated ad sets. Refreshing creative or expanding audiences typically restores CPM and conversion rates.`,
+        fixSteps: [
+          "Introduce new creative to fatigued ad sets immediately.",
+          "Expand the audience size to dilute frequency.",
+          "Split fatigued audiences into shorter recency windows to sequence messaging.",
+          "Consider ad-level frequency caps on placements to prevent future saturation.",
+        ],
+      })
+    );
   }
 };
 
@@ -462,20 +667,21 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
     return;
   }
 
-  if (includesAny(answers.G11, ["no"])) {
+  if (matchesWord(answers.G11, ["no"])) {
     findings.push(
       createFinding({
         ruleId: "TRK-007",
         platform: "GOOGLE",
         severity: "HIGH",
         category: "Conversion Tracking Setup",
-        title: "Enhanced Conversions are not configured",
-        detail: "Enhanced Conversions improve conversion signal quality for Google Ads.",
-        evidence: { G11: answers.G11 },
-        estimatedImpact: "Can reduce smart bidding signal quality.",
+        title: "Enhanced Conversions are not configured — Smart Bidding is running on degraded signals",
+        detail: `Enhanced Conversions fills the attribution gap caused by cookie consent, iOS privacy changes, and browser tracking restrictions. Without it, Google's Smart Bidding algorithms are receiving fewer and less accurate conversion signals, which directly degrades bid decisions across your $${Math.round(summary.spend || 0).toLocaleString()} in spend.`,
+        evidence: { G11: answers.G11, totalSpend: Math.round(summary.spend || 0) },
+        estimatedImpact: `Accounts that implement Enhanced Conversions typically recover 10–20% more attributed conversions from the same traffic — on $${Math.round(summary.spend || 0).toLocaleString()} in spend, better attribution directly improves Smart Bidding accuracy.`,
         fixSteps: [
-          "Configure Enhanced Conversions for primary conversion actions.",
-          "Verify diagnostics in Google Ads conversion settings.",
+          "Enable Enhanced Conversions for web in Google Ads conversion settings.",
+          "Configure the enhanced conversion tag to capture hashed email or phone at purchase.",
+          "Verify the diagnostic shows Enhanced Conversions data within 2–3 days of implementation.",
         ],
       })
     );
@@ -504,7 +710,7 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
     );
   }
 
-  if (includesAny(answers.G5, ["no", "never"])) {
+  if (matchesWord(answers.G5, ["no", "never"])) {
     findings.push(
       createFinding({
         ruleId: "KW-001",
@@ -512,13 +718,14 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
         severity: "CRITICAL",
         category: "Keyword Strategy",
         title: "No negative keyword process is confirmed",
-        detail: "Missing negative keywords can create avoidable search waste.",
-        evidence: { G5: answers.G5 },
-        estimatedImpact: "Can waste spend on irrelevant search queries.",
+        detail: `Without a confirmed negative keyword process, all $${Math.round(summary.spend || 0).toLocaleString()} in Google spend is exposed to irrelevant search queries. Industry data shows 10–30% of search spend in unmanaged accounts flows to low-intent or completely irrelevant searches. Establishing a weekly search term review is the single highest-leverage Google optimisation for accounts without it.`,
+        evidence: { G5: answers.G5, totalSpend: Math.round(summary.spend || 0) },
+        estimatedImpact: `10–30% of your $${Math.round(summary.spend || 0).toLocaleString()} in Google spend ($${Math.round((summary.spend || 0) * 0.15).toLocaleString()} estimated at a conservative 15%) may be flowing to irrelevant queries without a negative keyword review process.`,
         fixSteps: [
-          "Create shared negative keyword lists.",
-          "Review search terms weekly for active campaigns.",
-          "Separate brand protection from generic negatives.",
+          "Pull search term reports for the last 30 days across all campaigns.",
+          "Create shared negative keyword lists and apply them account-wide.",
+          "Separate brand-protection negatives from generic irrelevant query negatives.",
+          "Schedule a weekly 30-minute search term review as a recurring media buyer task.",
         ],
       })
     );
@@ -562,18 +769,22 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
     );
   }
 
-  if (text(answers.G8).includes("no") || text(answers.G8).includes("unsure")) {
+  if (matchesWord(answers.G8, ["no"]) || text(answers.G8).includes("unsure")) {
     findings.push(
       createFinding({
         ruleId: "AUD-006",
         platform: "GOOGLE",
         severity: "MEDIUM",
         category: "Audience & Attribution",
-        title: "Audience observation layers are not confirmed",
-        detail: "Observation audiences help identify high-value segments without restricting reach.",
-        evidence: { G8: answers.G8 },
-        estimatedImpact: "Missed segmentation and bid-adjustment insight.",
-        fixSteps: ["Add relevant remarketing and customer segments in observation mode."],
+        title: "Audience observation layers are not confirmed — bid adjustment data is missing",
+        detail: `Without observation audiences, Google campaigns have no data on which audience segments (remarketing lists, customer match, in-market segments) over- or under-perform. This removes the ability to apply bid adjustments that could reduce CPA or increase ROAS across your $${Math.round(summary.spend || 0).toLocaleString()} in spend.`,
+        evidence: { G8: answers.G8, totalSpend: Math.round(summary.spend || 0) },
+        estimatedImpact: "Bid adjustments on observation audiences typically improve CPA 10–20% by shifting budget toward segments with demonstrated higher intent.",
+        fixSteps: [
+          "Add remarketing lists (site visitors, cart abandoners, past converters) in observation mode to all campaigns.",
+          "Add customer match lists from CRM data in observation mode.",
+          "After 30 days of data, apply positive bid adjustments to high-converting segments.",
+        ],
       })
     );
   }
@@ -610,8 +821,7 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
               broadKeywords: broad.length,
               totalKeywords: keywords.length,
             },
-            estimatedImpact:
-              "Likely overspend on irrelevant queries; auditing search terms usually reveals significant waste.",
+            estimatedImpact: `$${Math.round(broadSpend).toLocaleString()} (${Number((broadShare * 100).toFixed(1))}% of keyword budget) is on broad match. Migrating proven converters to phrase or exact match typically recovers 15-30% of that spend through reduced irrelevant traffic.`,
             fixSteps: [
               "Pull last 30 days of search terms — flag irrelevant queries.",
               "Move proven converters to phrase or exact match.",
@@ -650,8 +860,7 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
               lowQsShare: Number((lowQsShare * 100).toFixed(1)),
               lowQsSpend: Math.round(lowQsSpend),
             },
-            estimatedImpact:
-              "Higher CPCs and reduced auction competitiveness on a meaningful chunk of spend.",
+            estimatedImpact: `$${Math.round(lowQsSpend).toLocaleString()} in spend is attributed to low Quality Score keywords. Improving QS to 7+ on this segment reduces CPCs and improves Ad Rank without spending more.`,
             fixSteps: [
               "Group low-QS keywords by ad group and review match between keyword, ad copy, and landing page.",
               "Tighten ad groups around shared intent so headlines can include the keyword.",
@@ -702,8 +911,7 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
                 clicks: numberValue(record.clicks),
               })),
           },
-          estimatedImpact:
-            "Adding high-spend non-converting terms as negatives can recapture meaningful budget.",
+          estimatedImpact: `$${Math.round(wastedSpend).toLocaleString()} in spend went to search terms with zero conversions. Adding these as negatives directly recaptures this budget on the next billing cycle.`,
           fixSteps: [
             "Review the highest-spend non-converting search terms.",
             "Add irrelevant terms to a shared negative keyword list.",
@@ -777,6 +985,187 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
         ],
       })
     );
+  }
+
+  // STR-009: Active Google campaigns with meaningful spend and zero conversions
+  if (googleCampaigns.length >= 2) {
+    const totalGoogleCampaignSpend2 = sumSpend(googleCampaigns);
+    const minGoogleThreshold = Math.max(50, totalGoogleCampaignSpend2 * 0.01);
+    const zeroConvCampaigns = googleCampaigns.filter((record) => {
+      const recordSpend = numberValue(record.spend);
+      const recordConversions = numberValue(record.conversions);
+      return (
+        recordSpend >= minGoogleThreshold &&
+        recordConversions === 0 &&
+        !isPausedStatus(record.status)
+      );
+    });
+    const zeroConvSpend = sumSpend(zeroConvCampaigns);
+    if (
+      zeroConvCampaigns.length > 0 &&
+      totalGoogleCampaignSpend2 > 0 &&
+      zeroConvSpend / totalGoogleCampaignSpend2 >= 0.1
+    ) {
+      findings.push(
+        createFinding({
+          ruleId: "STR-009",
+          platform: "GOOGLE",
+          severity: zeroConvSpend / totalGoogleCampaignSpend2 >= 0.3 ? "CRITICAL" : "HIGH",
+          category: "Conversion Tracking Setup",
+          title: "Google campaigns are spending with zero recorded conversions",
+          detail: `${zeroConvCampaigns.length} active campaign(s) consumed $${Math.round(zeroConvSpend).toLocaleString()} without recording a single conversion. These campaigns are generating clicks but no measurable return.`,
+          evidence: {
+            zeroConvCampaigns: zeroConvCampaigns.length,
+            wastedSpend: Math.round(zeroConvSpend),
+            wastedSharePercent: Number(
+              ((zeroConvSpend / totalGoogleCampaignSpend2) * 100).toFixed(1)
+            ),
+            examples: zeroConvCampaigns
+              .slice(0, 3)
+              .map((r) => ({ name: r.name, spend: Math.round(numberValue(r.spend)) })),
+          },
+          estimatedImpact: `$${Math.round(zeroConvSpend).toLocaleString()} produced zero conversions. This is either a tracking problem or a structural inefficiency that compounds with every day of continued spend.`,
+          fixSteps: [
+            "First rule out a tracking issue: check Conversion Actions and verify tag firing in Google Tag Assistant.",
+            "If tracking is confirmed, pause zero-conversion campaigns and diagnose: keyword relevance, landing page quality, and bid strategy.",
+            "If these are brand-new campaigns, allow at least 2 weeks and ~50 clicks per ad group before drawing conclusions.",
+            "Consider switching to Maximize Conversions (without a target CPA) to let Google learn before adding constraints.",
+          ],
+        })
+      );
+    }
+  }
+
+  // BID-005: Campaigns where conversion value < spend — ROAS below 1.0 and directly unprofitable
+  const campaignsWithConvValue = googleCampaigns.filter(
+    (r) => numberValue(r.convValue) > 0 && numberValue(r.spend) > 50
+  );
+  if (campaignsWithConvValue.length >= 1) {
+    const lossMakers = campaignsWithConvValue.filter(
+      (r) => numberValue(r.convValue) < numberValue(r.spend)
+    );
+    const lossMakersSpend = sumSpend(lossMakers);
+    if (lossMakers.length > 0) {
+      findings.push(
+        createFinding({
+          ruleId: "BID-005",
+          platform: "GOOGLE",
+          severity: "CRITICAL",
+          category: "Bidding Strategy Alignment",
+          title: "Google campaigns have conversion value below spend — these campaigns are directly unprofitable",
+          detail: `${lossMakers.length} campaign(s) show conversion value lower than cost, meaning a ROAS below 1.0. Google is reporting less revenue than you are spending on these campaigns.`,
+          evidence: {
+            lossMakingCampaigns: lossMakers.length,
+            totalCampaignsWithValue: campaignsWithConvValue.length,
+            lossMakingSpend: Math.round(lossMakersSpend),
+            examples: lossMakers.slice(0, 3).map((r) => ({
+              name: r.name,
+              spend: Math.round(numberValue(r.spend)),
+              convValue: Math.round(numberValue(r.convValue)),
+              roas: (numberValue(r.convValue) / numberValue(r.spend)).toFixed(2),
+            })),
+          },
+          estimatedImpact: `$${Math.round(lossMakersSpend).toLocaleString()} is flowing into campaigns where Google reports less than $1 in value per $1 spent. Every additional day of spend deepens the loss.`,
+          fixSteps: [
+            "Immediately reduce budgets on loss-making campaigns.",
+            "Verify conversion values are being passed correctly — check the gtag conversionValue parameter.",
+            "Cross-check with your order management system: Google's reported value may differ from actual revenue.",
+            "Review keyword-to-landing-page alignment and offer quality on the affected campaigns.",
+          ],
+        })
+      );
+    }
+  }
+
+  // KW-010: Active keywords with zero impressions — disapproved, below first-page bid, or policy-limited
+  if (keywords.length >= 5) {
+    const activeKeywords = keywords.filter(
+      (record) =>
+        !text(record.status).includes("paused") &&
+        !text(record.status).includes("removed")
+    );
+    const activeZeroImpression = activeKeywords.filter(
+      (record) =>
+        numberValue(record.impressions) === 0 && numberValue(record.spend) === 0
+    );
+    if (
+      activeKeywords.length > 0 &&
+      activeZeroImpression.length > 0 &&
+      activeZeroImpression.length / activeKeywords.length >= 0.2
+    ) {
+      findings.push(
+        createFinding({
+          ruleId: "KW-010",
+          platform: "GOOGLE",
+          severity: "MEDIUM",
+          category: "Keyword Strategy",
+          title: "Many active Google keywords are getting zero impressions",
+          detail: `${activeZeroImpression.length} active keyword(s) (${Math.round((activeZeroImpression.length / activeKeywords.length) * 100)}% of active keywords) received zero impressions in the data period. Common causes: bid below first page, low search volume, disapproval, or keyword-level policy restrictions.`,
+          evidence: {
+            zeroImpressionKeywords: activeZeroImpression.length,
+            activeKeywordsTotal: activeKeywords.length,
+            zeroImpressionSharePercent: Number(
+              ((activeZeroImpression.length / activeKeywords.length) * 100).toFixed(1)
+            ),
+            examples: activeZeroImpression
+              .slice(0, 5)
+              .map((r) => ({ keyword: r.keyword, matchType: r.matchType, status: r.status })),
+          },
+          estimatedImpact:
+            "Zero-impression active keywords inflate account clutter, mask Quality Score problems, and can indicate disapproved ads that need immediate attention.",
+          fixSteps: [
+            "Check Google Ads status column for 'Below first page bid', 'Low search volume', or 'Disapproved'.",
+            "Pause keywords labelled 'Low search volume' — they consume account resources without contributing.",
+            "For keywords showing 'Below first page bid', evaluate whether raising the bid is justified by relevance.",
+            "Remove duplicate keywords that overlap with better-performing broad or phrase match versions.",
+          ],
+        })
+      );
+    }
+  }
+
+  // AD-001: RSA asset performance — high share of 'Low' rated assets
+  const assets = getRecordsByLevel(dataset, "GOOGLE", "asset");
+  if (assets.length >= 5) {
+    const ratedAssets = assets.filter(
+      (r) =>
+        text(r.performance).includes("low") ||
+        text(r.performance).includes("good") ||
+        text(r.performance).includes("best")
+    );
+    const lowPerfAssets = ratedAssets.filter((r) =>
+      text(r.performance).includes("low")
+    );
+    if (ratedAssets.length >= 5 && lowPerfAssets.length / ratedAssets.length >= 0.4) {
+      findings.push(
+        createFinding({
+          ruleId: "AD-001",
+          platform: "GOOGLE",
+          severity: "MEDIUM",
+          category: "Ad Copy & Extensions",
+          title: "A large share of Google RSA assets are rated 'Low' — ad competitiveness is reduced",
+          detail: `${lowPerfAssets.length} of ${ratedAssets.length} rated RSA asset(s) carry a 'Low' performance label. Google uses this rating to determine how often each headline and description is shown. A high proportion of low-rated assets reduces Ad Strength and delivery competitiveness.`,
+          evidence: {
+            lowPerfAssets: lowPerfAssets.length,
+            ratedAssets: ratedAssets.length,
+            lowPerfSharePercent: Number(
+              ((lowPerfAssets.length / ratedAssets.length) * 100).toFixed(1)
+            ),
+            examples: lowPerfAssets
+              .slice(0, 3)
+              .map((r) => ({ asset: r.asset, type: r.type })),
+          },
+          estimatedImpact:
+            "RSAs with many 'Low' assets receive lower Ad Strength scores and are served less frequently. Replacing them with message-matched alternatives improves CTR and Ad Rank without changing bids.",
+          fixSteps: [
+            "Remove or replace 'Low'-rated assets with new headline/description variations.",
+            "Ensure each RSA includes at least 3 headlines containing the primary keyword.",
+            "Test benefit-focused and offer-focused headlines against each other.",
+            "Avoid pinning headlines unless absolutely necessary — pinning removes Google's ability to optimise combinations.",
+          ],
+        })
+      );
+    }
   }
 };
 
@@ -856,7 +1245,7 @@ const addTikTokFindings = ({ audit, dataset, findings }) => {
     );
   }
 
-  if (text(answers.T8).includes("no") || text(answers.T8).includes("unsure")) {
+  if (matchesWord(answers.T8, ["no"]) || text(answers.T8).includes("unsure")) {
     findings.push(
       createFinding({
         ruleId: "AUD-001",
@@ -957,12 +1346,106 @@ const addTikTokFindings = ({ audit, dataset, findings }) => {
               ((lowCtrSpend / totalAdSpend) * 100).toFixed(1)
             ),
           },
-          estimatedImpact:
-            "Low CTR usually means high CPM-to-conversion ratio; reallocating to stronger creative typically lifts ROAS.",
+          estimatedImpact: `$${Math.round(lowCtrSpend).toLocaleString()} (${Number(((lowCtrSpend / totalAdSpend) * 100).toFixed(1))}% of ad spend) is going to ads with CTR below 0.5%. Reallocating to stronger creative directly improves ROAS without increasing budget.`,
           fixSteps: [
             "Pause the lowest-CTR ads and shift budget to top performers.",
             "Test stronger 1-3 second hooks on remaining ads.",
             "Iterate on creator, format, and pattern interrupts.",
+          ],
+        })
+      );
+    }
+  }
+
+  // STR-008: TikTok campaigns with spend and zero conversions
+  if (tiktokCampaigns.length >= 2) {
+    const totalTikTokSpend = sumSpend(tiktokCampaigns);
+    const minTikTokThreshold = Math.max(30, totalTikTokSpend * 0.01);
+    const zeroConvTikTok = tiktokCampaigns.filter((record) => {
+      const recordSpend = numberValue(record.spend);
+      const recordConversions = numberValue(record.conversions);
+      return recordSpend >= minTikTokThreshold && recordConversions === 0;
+    });
+    const zeroConvTikTokSpend = sumSpend(zeroConvTikTok);
+    if (
+      zeroConvTikTok.length > 0 &&
+      totalTikTokSpend > 0 &&
+      zeroConvTikTokSpend / totalTikTokSpend >= 0.1
+    ) {
+      findings.push(
+        createFinding({
+          ruleId: "STR-008",
+          platform: "TIKTOK",
+          severity: zeroConvTikTokSpend / totalTikTokSpend >= 0.3 ? "CRITICAL" : "HIGH",
+          category: "Campaign Structure",
+          title: "TikTok campaigns are spending with zero recorded conversions",
+          detail: `${zeroConvTikTok.length} TikTok campaign(s) consumed $${Math.round(zeroConvTikTokSpend).toLocaleString()} without recording a single conversion. On TikTok, zero conversions after meaningful spend almost always points to a pixel issue, wrong optimisation event, or creative that cannot bridge the intent gap to purchase.`,
+          evidence: {
+            zeroConvCampaigns: zeroConvTikTok.length,
+            wastedSpend: Math.round(zeroConvTikTokSpend),
+            wastedSharePercent: Number(
+              ((zeroConvTikTokSpend / totalTikTokSpend) * 100).toFixed(1)
+            ),
+            examples: zeroConvTikTok
+              .slice(0, 3)
+              .map((r) => ({ name: r.name, spend: Math.round(numberValue(r.spend)) })),
+          },
+          estimatedImpact: `$${Math.round(zeroConvTikTokSpend).toLocaleString()} produced no conversions. This is either a tracking problem or the creative is not generating purchase intent.`,
+          fixSteps: [
+            "Check TikTok Pixel Helper to confirm the pixel fires on the conversion page.",
+            "Verify the optimisation event (e.g. CompletePayment) is recording in TikTok Events Manager.",
+            "If tracking is confirmed, review creative: the hook, offer, and CTA must match the audience's buying intent.",
+            "Test with a Broad Audience campaign to let TikTok's algorithm find converters before narrowing targeting.",
+          ],
+        })
+      );
+    }
+  }
+
+  // CRE-003: High CPM with low CTR — expensive impressions failing to earn clicks
+  const tiktokAdGroups = getRecordsByLevel(dataset, "TIKTOK", "adgroup");
+  const adsWithCpmCtr = tiktokAds.filter(
+    (r) => numberValue(r.cpm) > 0 && numberValue(r.ctr) > 0
+  );
+  if (adsWithCpmCtr.length >= 3) {
+    const totalTikTokAdSpend = sumSpend(tiktokAds);
+    const avgCpm =
+      adsWithCpmCtr.reduce((acc, r) => acc + numberValue(r.cpm), 0) /
+      adsWithCpmCtr.length;
+    const highCpmLowCtr = adsWithCpmCtr.filter(
+      (r) => numberValue(r.cpm) > avgCpm * 1.5 && numberValue(r.ctr) < 0.5
+    );
+    const highCpmLowCtrSpend = sumSpend(highCpmLowCtr);
+    if (
+      highCpmLowCtr.length > 0 &&
+      totalTikTokAdSpend > 0 &&
+      highCpmLowCtrSpend / totalTikTokAdSpend >= 0.15
+    ) {
+      findings.push(
+        createFinding({
+          ruleId: "CRE-003",
+          platform: "TIKTOK",
+          severity: "HIGH",
+          category: "Creative Performance",
+          title: "TikTok ads have high CPM but very low CTR — budget is burning on unclicked impressions",
+          detail: `${highCpmLowCtr.length} ad(s) have CPM above 1.5× the account average ($${avgCpm.toFixed(2)}) but CTR below 0.5%. These ads are winning expensive auction slots but failing to generate clicks — a sign of mismatched creative or wrong audience.`,
+          evidence: {
+            highCpmLowCtrAds: highCpmLowCtr.length,
+            accountAvgCpm: +avgCpm.toFixed(2),
+            highCpmLowCtrSpend: Math.round(highCpmLowCtrSpend),
+            examples: highCpmLowCtr.slice(0, 3).map((r) => ({
+              name: r.name,
+              cpm: numberValue(r.cpm).toFixed(2),
+              ctr: numberValue(r.ctr).toFixed(2),
+              spend: Math.round(numberValue(r.spend)),
+            })),
+          },
+          estimatedImpact: `$${Math.round(highCpmLowCtrSpend).toLocaleString()} is on ads that cost above average to show but fail to earn clicks. Native-style creative typically improves CTR 2-3× and reduces effective CPM.`,
+          fixSteps: [
+            "Pause high-CPM, low-CTR ads and shift budget to your highest-CTR creatives.",
+            "Review the hook (first 1-3 seconds): if it looks like an ad, TikTok users scroll past.",
+            "Test UGC-style, native-format creative without branded intros or obvious sales pitches.",
+            "Check audience targeting — high CPMs often indicate audiences that are too narrow or have inflated bids.",
           ],
         })
       );
@@ -1011,6 +1494,719 @@ const addDataQualityFindings = ({ audit, dataset, findings }) => {
           ],
         })
       );
+    }
+  }
+};
+
+const addBusinessProfileFindings = ({ audit, dataset, findings }) => {
+  const profile = getBusinessProfile(audit);
+  if (!profile) return;
+
+  const { sectionA, sectionB, sectionC } = profile;
+  const platforms = audit.selectedPlatforms;
+
+  // ── B1: Pixel / conversion tag not installed ──────────────────────────────
+  if (matchesWord(sectionB.pixelInstalled, ["no"])) {
+    for (const platform of platforms) {
+      findings.push(
+        createFinding({
+          ruleId: "BP-TRK-001",
+          platform,
+          severity: "CRITICAL",
+          category: getTrackingCategory(platform),
+          title: "Pixel / conversion tag is not installed or verified",
+          detail:
+            "Without a tracking pixel or conversion tag the ad platform has no signal to measure results or optimise bidding. This is the single most common root cause of wasted ad spend.",
+          evidence: { B1: sectionB.pixelInstalled },
+          estimatedImpact:
+            "All smart-bidding strategies are running blind. Conversion reporting is inaccurate or empty.",
+          fixSteps: [
+            "Install the platform pixel on every page of your website.",
+            "Verify the pixel fires on the primary conversion page using the platform's diagnostic tool.",
+            "Set up at least one primary conversion event before running any spend.",
+          ],
+        })
+      );
+    }
+  }
+
+  // ── B2: Wrong conversion event ────────────────────────────────────────────
+  if (
+    matchesWord(sectionB.correctConversionEvent, ["no"]) ||
+    text(sectionB.correctConversionEvent).includes("unsure")
+  ) {
+    for (const platform of platforms) {
+      findings.push(
+        createFinding({
+          ruleId: "BP-TRK-002",
+          platform,
+          severity: "HIGH",
+          category: getTrackingCategory(platform),
+          title: "Conversion event may not match campaign objective",
+          detail:
+            "Optimising to the wrong event — for example Add to Cart instead of Purchase — teaches the bidding algorithm to target the wrong users. The algorithm maximises what you measure, not what you actually want.",
+          evidence: { B2: sectionB.correctConversionEvent },
+          estimatedImpact:
+            "Bidding algorithms learn incorrect behaviour, systematically inflating your real CPA.",
+          fixSteps: [
+            "Audit active conversion events in each platform's settings.",
+            "Ensure the primary event matches your objective: Sales → Purchase, Leads → Lead Submit.",
+            "Demote mismatched events to 'Informational' or secondary status.",
+          ],
+        })
+      );
+    }
+  }
+
+  // ── B3: UTM inconsistency ─────────────────────────────────────────────────
+  if (
+    matchesWord(sectionB.utmConsistency, ["no"]) ||
+    text(sectionB.utmConsistency).includes("inconsistently")
+  ) {
+    for (const platform of platforms) {
+      findings.push(
+        createFinding({
+          ruleId: "BP-TRK-003",
+          platform,
+          severity: "MEDIUM",
+          category: getAttributionCategory(platform),
+          title: "UTM parameters are missing or inconsistent",
+          detail:
+            "Without consistent UTMs, GA4 and third-party analytics tools cannot validate platform-reported conversions. Platform-reported conversion numbers are frequently 20-40% inflated versus independently tracked data.",
+          evidence: { B3: sectionB.utmConsistency },
+          estimatedImpact:
+            "Attribution data is unreliable. You cannot independently verify platform ROAS or conversion counts.",
+          fixSteps: [
+            "Define a UTM naming convention and document it in a shared template.",
+            "Use a URL builder tool or spreadsheet for every ad link.",
+            "Spot-check GA4 to confirm utm_source, utm_medium, and utm_campaign are populating.",
+          ],
+        })
+      );
+    }
+  }
+
+  // ── B5: No server-side tracking ───────────────────────────────────────────
+  if (matchesWord(sectionB.serverSideTracking, ["no"])) {
+    for (const platform of platforms) {
+      findings.push(
+        createFinding({
+          ruleId: "BP-TRK-004",
+          platform,
+          severity: platform === "GOOGLE" ? "MEDIUM" : "HIGH",
+          category: getTrackingCategory(platform),
+          title: "Server-side tracking is not implemented",
+          detail:
+            "Post-iOS 14 browser privacy restrictions block 20-40% of pixel events. Server-side tracking (Meta CAPI, TikTok Events API, Google Enhanced Conversions) sends events directly from your server, restoring signal quality and allowing algorithms to optimise accurately.",
+          evidence: { B5: sectionB.serverSideTracking },
+          estimatedImpact:
+            "Conversion undercounting suppresses algorithm optimisation. Reported ROAS is likely understated and campaign delivery is weaker than it could be.",
+          fixSteps: [
+            "Implement server-side events via your backend, Shopify integration, or a tag management server (e.g. Stape).",
+            "Run pixel and server-side events in parallel to check event match quality.",
+            "Verify event match quality score reaches 6+ in Meta Events Manager or equivalent.",
+          ],
+        })
+      );
+    }
+  }
+
+  // ── A3: Target CPA miss ───────────────────────────────────────────────────
+  const targetCpa = numberValue(sectionA.targetCpa);
+  if (targetCpa > 0) {
+    for (const platform of platforms) {
+      const summary = getPlatformSummary(dataset, platform);
+      if (summary.spend > 0 && summary.conversions > 0) {
+        const actualCpa = summary.spend / summary.conversions;
+        const ratio = actualCpa / targetCpa;
+        if (ratio >= 1.5) {
+          findings.push(
+            createFinding({
+              ruleId: "BP-PERF-001",
+              platform,
+              severity: ratio >= 2.5 ? "CRITICAL" : "HIGH",
+              category: getBiddingCategory(platform),
+              title: `${PLATFORM_LABELS[platform]} CPA is significantly above your declared target`,
+              detail: `Your declared target CPA is $${targetCpa}. The actual CPA in this data is $${actualCpa.toFixed(2)} — ${ratio.toFixed(1)}× your goal. Every acquisition is costing far more than your business model planned for.`,
+              evidence: {
+                targetCpa,
+                actualCpa: Math.round(actualCpa * 100) / 100,
+                multiplier: +ratio.toFixed(1),
+                totalSpend: Math.round(summary.spend),
+                totalConversions: summary.conversions,
+              },
+              estimatedImpact: `At ${ratio.toFixed(1)}× your target, the cost of inaction compounds with every dollar of additional spend.`,
+              fixSteps: [
+                "Identify the top-spending campaigns and ad sets with CPA furthest above target — pause or cap them first.",
+                "Review bidding strategy: check whether conversion volume is sufficient for stable smart bidding.",
+                "Audit the conversion event being optimised — confirm it matches the intended action.",
+                "Test landing page conversion rate improvements; ad-side CPA is often constrained by post-click performance.",
+              ],
+            })
+          );
+        }
+      }
+    }
+  }
+
+  // ── A4 + A5: Target ROAS miss (estimated from conversions × avg order value) ─
+  const targetRoas = numberValue(sectionA.targetRoas);
+  const avgOrderValue = numberValue(sectionA.avgOrderValue);
+  if (targetRoas > 0 && avgOrderValue > 0) {
+    for (const platform of platforms) {
+      const summary = getPlatformSummary(dataset, platform);
+      if (summary.spend > 0 && summary.conversions > 0) {
+        const estimatedRevenue = summary.conversions * avgOrderValue;
+        const estimatedRoas = estimatedRevenue / summary.spend;
+        const ratio = estimatedRoas / targetRoas;
+        if (ratio < 0.7) {
+          findings.push(
+            createFinding({
+              ruleId: "BP-PERF-002",
+              platform,
+              severity: ratio < 0.4 ? "CRITICAL" : "HIGH",
+              category: getBiddingCategory(platform),
+              title: `${PLATFORM_LABELS[platform]} estimated ROAS is significantly below your target`,
+              detail: `Using your declared average order value of $${avgOrderValue}, the estimated ROAS from this data is ${estimatedRoas.toFixed(2)}× against your target of ${targetRoas}×. The account is returning roughly ${Math.round(ratio * 100)}% of your intended return.`,
+              evidence: {
+                targetRoas,
+                estimatedRoas: +estimatedRoas.toFixed(2),
+                avgOrderValue,
+                totalSpend: Math.round(summary.spend),
+                estimatedRevenue: Math.round(estimatedRevenue),
+                percentOfTarget: Math.round(ratio * 100),
+              },
+              estimatedImpact: `At ${estimatedRoas.toFixed(2)}× vs a ${targetRoas}× target, scaling spend in this state accelerates losses.`,
+              fixSteps: [
+                "Identify and pause the lowest-ROAS campaigns first.",
+                "Shift budget toward the highest-ROAS ad sets or campaigns.",
+                "Confirm the conversion event captures revenue value correctly.",
+                "Assess whether landing page or offer quality is limiting post-click conversion.",
+              ],
+            })
+          );
+        }
+      }
+    }
+  }
+
+  // ── A2: Budget under-delivery ─────────────────────────────────────────────
+  const monthlyBudget = numberValue(sectionA.monthlyBudget);
+  if (monthlyBudget > 0) {
+    const totalActualSpend = platforms.reduce(
+      (acc, platform) => acc + getPlatformSummary(dataset, platform).spend,
+      0
+    );
+    if (totalActualSpend > 0) {
+      const deliveryRate = totalActualSpend / monthlyBudget;
+      if (deliveryRate < 0.6) {
+        const primaryPlatform =
+          platforms.find((p) => getPlatformSummary(dataset, p).spend > 0) || platforms[0];
+        findings.push(
+          createFinding({
+            ruleId: "BP-PERF-003",
+            platform: primaryPlatform,
+            severity: "MEDIUM",
+            category: getBiddingCategory(primaryPlatform),
+            title: "Ad spend is significantly below your declared monthly budget",
+            detail: `Your declared monthly budget is $${monthlyBudget.toLocaleString()}. The data in this audit shows $${Math.round(totalActualSpend).toLocaleString()} in total spend — only ${Math.round(deliveryRate * 100)}% of your declared budget. Under-delivery at this scale usually indicates paused campaigns, disapproved ads, limited bids, or audiences that are too small.`,
+            evidence: {
+              declaredMonthlyBudget: monthlyBudget,
+              actualSpendInData: Math.round(totalActualSpend),
+              deliveryRatePercent: Math.round(deliveryRate * 100),
+            },
+            estimatedImpact:
+              "Your declared growth targets are being missed by default, before any optimisation work begins.",
+            fixSteps: [
+              "Check for disapproved ads or policy violations limiting delivery.",
+              "Review campaign and ad set statuses — identify everything paused.",
+              "Audit bid and budget caps that may be artificially constraining spend.",
+              "Broaden audience size if campaigns show 'audience too small' warnings.",
+            ],
+          })
+        );
+      }
+    }
+  }
+
+  // ── A6 (blended CAC): profitability alert when CPA approaches or exceeds CAC ─
+  const blendedCac = numberValue(sectionA.blendedCac);
+  if (blendedCac > 0) {
+    for (const platform of platforms) {
+      const summary = getPlatformSummary(dataset, platform);
+      if (summary.spend > 0 && summary.conversions > 0) {
+        const actualCpa = summary.spend / summary.conversions;
+        const ratio = actualCpa / blendedCac;
+        if (ratio >= 0.9) {
+          const isOver = ratio >= 1.0;
+          findings.push(
+            createFinding({
+              ruleId: "BP-PROF-001",
+              platform,
+              severity: isOver ? "CRITICAL" : "HIGH",
+              category: getBiddingCategory(platform),
+              title: isOver
+                ? `${PLATFORM_LABELS[platform]} ad CPA equals or exceeds your blended CAC — account may be unprofitable`
+                : `${PLATFORM_LABELS[platform]} ad CPA is approaching your blended CAC`,
+              detail: isOver
+                ? `Your declared blended CAC is $${blendedCac}. The current ${PLATFORM_LABELS[platform]} CPA is $${actualCpa.toFixed(2)}, which equals or exceeds what you can sustainably pay per customer across all channels. At this CPA, paid advertising is likely destroying business margin.`
+                : `Your declared blended CAC is $${blendedCac}. The current ${PLATFORM_LABELS[platform]} CPA is $${actualCpa.toFixed(2)} — ${Math.round(ratio * 100)}% of your maximum sustainable acquisition cost. A minor performance dip will push the account into unprofitable territory.`,
+              evidence: {
+                blendedCac,
+                actualCpa: Math.round(actualCpa * 100) / 100,
+                percentOfCac: Math.round(ratio * 100),
+              },
+              estimatedImpact: isOver
+                ? "Every additional dollar of spend at this CPA deepens the loss per customer."
+                : "There is very little headroom before ads become unprofitable.",
+              fixSteps: [
+                "Immediately pause highest-CPA campaigns and ad sets.",
+                "Identify whether the issue is conversion rate (ad/landing page) or CPM efficiency (audience/creative).",
+                "Set automated rules to pause ad sets whose 7-day CPA exceeds your blended CAC.",
+                "Re-evaluate whether your declared CAC still reflects current business unit economics.",
+              ],
+            })
+          );
+        }
+      }
+    }
+  }
+
+  // ── C1 (bestEverCpa): performance regression vs historical best ───────────
+  const bestEverCpa = numberValue(sectionC.bestEverCpa);
+  if (bestEverCpa > 0) {
+    for (const platform of platforms) {
+      const summary = getPlatformSummary(dataset, platform);
+      if (summary.spend > 0 && summary.conversions > 0) {
+        const actualCpa = summary.spend / summary.conversions;
+        if (actualCpa > bestEverCpa * 2) {
+          findings.push(
+            createFinding({
+              ruleId: "BP-BENCH-001",
+              platform,
+              severity: "HIGH",
+              category: getBiddingCategory(platform),
+              title: `${PLATFORM_LABELS[platform]} CPA is more than 2× your declared best-ever performance`,
+              detail: `Your declared best-ever CPA is $${bestEverCpa}. The current ${PLATFORM_LABELS[platform]} CPA is $${actualCpa.toFixed(2)} — ${(actualCpa / bestEverCpa).toFixed(1)}× worse. This level of regression suggests a structural change: audience saturation, creative fatigue, a tracking break, or a platform algorithm shift.`,
+              evidence: {
+                bestEverCpa,
+                actualCpa: Math.round(actualCpa * 100) / 100,
+                regressionMultiplier: +(actualCpa / bestEverCpa).toFixed(1),
+              },
+              estimatedImpact:
+                "This level of regression typically requires structural investigation, not just incremental optimisation.",
+              fixSteps: [
+                "Compare current account structure to the period when best CPA was achieved.",
+                "Check for tracking breaks that may be inflating the measured CPA.",
+                "Test a simplified structure (fewer campaigns, tighter audiences) to see if performance recovers.",
+                "Audit creative: compare current CTR and hook rate to historical benchmarks.",
+              ],
+            })
+          );
+        }
+      }
+    }
+  }
+
+  // ── C5: Low landing page conversion rate ─────────────────────────────────
+  const landingPageCvr = numberValue(sectionC.landingPageConversionRate);
+  if (landingPageCvr > 0 && landingPageCvr < 1.5) {
+    for (const platform of platforms) {
+      findings.push(
+        createFinding({
+          ruleId: "BP-BENCH-002",
+          platform,
+          severity: "HIGH",
+          category: getAttributionCategory(platform),
+          title: "Landing page conversion rate is low — ad CPA improvements are limited",
+          detail: `Your declared landing page conversion rate is ${landingPageCvr}%. At this rate, even ads with excellent CTR and targeting will produce high CPAs because most ad traffic does not convert. Improving the landing page typically delivers faster CPA reductions than optimising the ads themselves.`,
+          evidence: { landingPageConversionRate: landingPageCvr },
+          estimatedImpact:
+            "A 1% improvement in landing page CVR often halves CPA more effectively than months of ad-level optimisation.",
+          fixSteps: [
+            "Run a CRO audit on the primary landing page — check load speed, above-fold clarity, and CTA prominence.",
+            "A/B test a simplified version of the page with a single, clear call to action.",
+            "Ensure ad creative messaging matches landing page messaging exactly (message match).",
+            "Check page speed with Google PageSpeed Insights — mobile load time above 3s cuts conversion rate significantly.",
+          ],
+        })
+      );
+    }
+  }
+};
+
+const addBenchmarkFindings = ({ audit, dataset, findings }) => {
+  const bp = getBusinessProfile(audit);
+  const businessType = bp?.sectionA?.businessType || "Other";
+
+  for (const platform of audit.selectedPlatforms) {
+    const summary = getPlatformSummary(dataset, platform);
+    if (!summary.spend || summary.spend <= 0) continue;
+
+    // CTR benchmark — all three platforms
+    const ctrBenchmark = getBenchmark("ctr", platform, businessType);
+    if (ctrBenchmark && summary.impressions > 5000) {
+      const actualCtr = (summary.clicks / summary.impressions) * 100;
+      if (actualCtr < ctrBenchmark.danger) {
+        findings.push(
+          createFinding({
+            ruleId: "BENCH-CTR-001",
+            platform,
+            severity: "HIGH",
+            category: platform === "GOOGLE" ? "Quality Score & Relevance" : "Creative Performance",
+            title: `${PLATFORM_LABELS[platform]} CTR is critically below the ${businessType} industry benchmark`,
+            detail: `Your ${PLATFORM_LABELS[platform]} account CTR is ${actualCtr.toFixed(2)}% against an industry benchmark of ${ctrBenchmark.good}% for ${businessType}. A CTR this far below benchmark (danger threshold: ${ctrBenchmark.danger}%) indicates poor creative relevance, weak ad copy, or significant audience-creative mismatch. At your current spend of $${Math.round(summary.spend).toLocaleString()}, you are paying for impressions at an industry-trailing efficiency.`,
+            evidence: {
+              actualCtr: +actualCtr.toFixed(2),
+              benchmarkGood: ctrBenchmark.good,
+              benchmarkDanger: ctrBenchmark.danger,
+              businessType,
+              impressions: summary.impressions,
+            },
+            estimatedImpact: `Closing the gap from ${actualCtr.toFixed(2)}% to the ${ctrBenchmark.good}% benchmark would deliver significantly more clicks at the same CPM — equivalent to free traffic on your current spend of $${Math.round(summary.spend).toLocaleString()}.`,
+            fixSteps: [
+              `Test 3–5 new creative concepts with stronger hooks — the ${businessType} benchmark on ${PLATFORM_LABELS[platform]} is ${ctrBenchmark.good}% CTR.`,
+              "Audit top-spending ads and pause anything with CTR below half the benchmark.",
+              "Tighten audience targeting to improve relevance.",
+              platform === "GOOGLE"
+                ? "Review ad copy for keyword-to-headline match and strengthen ad extensions."
+                : "Test video formats vs. static images — video typically drives higher CTR on this platform.",
+            ],
+          })
+        );
+      } else if (actualCtr < ctrBenchmark.warning) {
+        findings.push(
+          createFinding({
+            ruleId: "BENCH-CTR-001",
+            platform,
+            severity: "MEDIUM",
+            category: platform === "GOOGLE" ? "Quality Score & Relevance" : "Creative Performance",
+            title: `${PLATFORM_LABELS[platform]} CTR is below the ${businessType} industry benchmark`,
+            detail: `Your ${PLATFORM_LABELS[platform]} account CTR is ${actualCtr.toFixed(2)}%. The industry benchmark for ${businessType} on ${PLATFORM_LABELS[platform]} is ${ctrBenchmark.good}%. You are in the warning zone (below ${ctrBenchmark.warning}%) — creative refresh and audience refinement will improve downstream CPA.`,
+            evidence: {
+              actualCtr: +actualCtr.toFixed(2),
+              benchmarkGood: ctrBenchmark.good,
+              benchmarkWarning: ctrBenchmark.warning,
+              businessType,
+            },
+            estimatedImpact: `Reaching the ${ctrBenchmark.good}% benchmark CTR would reduce your effective CPC without increasing spend.`,
+            fixSteps: [
+              `Target ${ctrBenchmark.good}% CTR for ${businessType} accounts on ${PLATFORM_LABELS[platform]}.`,
+              "Rotate in fresh creative — pause ads running more than 30 days with declining CTR.",
+              "Test new audience segments that may be more receptive to your offer.",
+            ],
+          })
+        );
+      }
+    }
+
+    // CPM benchmark — Meta and TikTok only
+    const cpmBenchmark = getBenchmark("cpm", platform, businessType);
+    if (cpmBenchmark && summary.impressions > 5000) {
+      const actualCpm = (summary.spend / summary.impressions) * 1000;
+      const overVsGood = Math.round((actualCpm - cpmBenchmark.good) / 1000 * summary.impressions);
+      if (actualCpm > cpmBenchmark.danger) {
+        findings.push(
+          createFinding({
+            ruleId: "BENCH-CPM-001",
+            platform,
+            severity: "HIGH",
+            category: "Audience Strategy",
+            title: `${PLATFORM_LABELS[platform]} CPM is critically above the ${businessType} industry benchmark`,
+            detail: `Your ${PLATFORM_LABELS[platform]} CPM is $${actualCpm.toFixed(2)}, which exceeds the danger threshold of $${cpmBenchmark.danger} for ${businessType} accounts. You are overpaying for impressions by an estimated $${overVsGood.toLocaleString()} compared to benchmark-level buying ($${cpmBenchmark.good} CPM target).`,
+            evidence: {
+              actualCpm: +actualCpm.toFixed(2),
+              benchmarkGood: cpmBenchmark.good,
+              benchmarkDanger: cpmBenchmark.danger,
+              businessType,
+              totalSpend: Math.round(summary.spend),
+              impressions: summary.impressions,
+              estimatedOverspend: overVsGood,
+            },
+            estimatedImpact: `Overpaying an estimated $${overVsGood.toLocaleString()} vs. benchmark CPM efficiency at your current impression volume.`,
+            fixSteps: [
+              "Broaden targeting to access cheaper inventory — narrow audiences drive CPM spikes.",
+              "Test interest-based and lookalike audiences alongside retargeting (retargeting pools carry premium CPMs).",
+              "Review campaign objective — conversion objectives have higher CPMs than traffic or reach objectives.",
+              "Audit ad set overlap — overlapping audiences bid against each other and inflate CPM.",
+            ],
+          })
+        );
+      } else if (actualCpm > cpmBenchmark.warning) {
+        findings.push(
+          createFinding({
+            ruleId: "BENCH-CPM-001",
+            platform,
+            severity: "MEDIUM",
+            category: "Audience Strategy",
+            title: `${PLATFORM_LABELS[platform]} CPM is above the ${businessType} industry benchmark`,
+            detail: `Your ${PLATFORM_LABELS[platform]} CPM is $${actualCpm.toFixed(2)}, above the recommended ceiling of $${cpmBenchmark.warning} for ${businessType}. The ideal target is $${cpmBenchmark.good}. This indicates audience or bidding inefficiency.`,
+            evidence: {
+              actualCpm: +actualCpm.toFixed(2),
+              benchmarkGood: cpmBenchmark.good,
+              benchmarkWarning: cpmBenchmark.warning,
+              businessType,
+            },
+            estimatedImpact: `Reducing CPM to the $${cpmBenchmark.good} benchmark would extend your reach significantly at the same spend.`,
+            fixSteps: [
+              "Test broader audiences to access cheaper inventory.",
+              "Use the Audience Overlap tool to consolidate competing ad sets.",
+              "Test traffic or reach objectives which typically access cheaper inventory than conversion objectives.",
+            ],
+          })
+        );
+      }
+    }
+  }
+};
+
+const addOpportunityFindings = ({ audit, dataset, findings }) => {
+  const bp = getBusinessProfile(audit);
+  const sectionA = bp?.sectionA || {};
+  const businessType = sectionA.businessType || "Other";
+  const monthlyBudget = numberValue(sectionA.monthlyBudget);
+
+  // OPP-001: No Google brand campaign
+  if (audit.selectedPlatforms.includes("GOOGLE")) {
+    const campaigns = getRecordsByLevel(dataset, "GOOGLE", "campaign");
+    if (campaigns.length > 0) {
+      const hasBrandCampaign = campaigns.some((c) =>
+        text(c.name).includes("brand") ||
+        text(c.name).includes("branded") ||
+        text(c.name).includes("trademark")
+      );
+      if (!hasBrandCampaign) {
+        findings.push(
+          createFinding({
+            ruleId: "OPP-001",
+            platform: "GOOGLE",
+            severity: "MEDIUM",
+            category: "Campaign Structure",
+            title: "No Google brand campaign detected — brand traffic is unprotected",
+            detail: `None of your ${campaigns.length} Google campaign(s) appear to target branded keywords. Without a dedicated brand campaign, competitors can bid on your brand name and capture high-intent searches that should convert at a fraction of your non-brand CPA. Brand campaigns typically achieve 5–10× better CTR and ROAS than non-brand.`,
+            evidence: { campaignCount: campaigns.length, brandCampaignDetected: false },
+            estimatedImpact: "Unprotected brand searches allow competitors to capture your highest-intent traffic at no cost to you.",
+            fixSteps: [
+              "Create a dedicated branded keyword campaign with exact and phrase match variants of your brand name.",
+              "Set bids high enough to maintain brand impression share above 90%.",
+              "Add competitor brand terms to a separate observation campaign to monitor intent traffic.",
+            ],
+          })
+        );
+      }
+    }
+  }
+
+  // OPP-002: eCommerce Google with conversions but zero conversion value
+  if (audit.selectedPlatforms.includes("GOOGLE") && businessType === "eCommerce") {
+    const campaigns = getRecordsByLevel(dataset, "GOOGLE", "campaign");
+    if (campaigns.length > 0) {
+      const totalConvValue = campaigns.reduce((sum, c) => sum + numberValue(c.convValue), 0);
+      const totalConversions = campaigns.reduce((sum, c) => sum + numberValue(c.conversions), 0);
+      const totalSpend = campaigns.reduce((sum, c) => sum + numberValue(c.spend), 0);
+      if (totalConversions > 0 && totalConvValue === 0) {
+        findings.push(
+          createFinding({
+            ruleId: "OPP-002",
+            platform: "GOOGLE",
+            severity: "HIGH",
+            category: "Conversion Tracking Setup",
+            title: "eCommerce account records conversions but no conversion value — ROAS bidding is impossible",
+            detail: `Your Google account recorded ${Math.round(totalConversions)} conversions with $0 in conversion value across $${Math.round(totalSpend).toLocaleString()} in spend. Without revenue data flowing into Google Ads, Smart Bidding cannot optimise for ROAS — it defaults to CPA-style optimisation with no understanding of order value. This is a critical gap for any eCommerce account.`,
+            evidence: {
+              totalConversions: Math.round(totalConversions),
+              totalConvValue: 0,
+              totalSpend: Math.round(totalSpend),
+            },
+            estimatedImpact: "Smart Bidding is optimising for count, not revenue — enabling value-based bidding typically improves ROAS 15–30% for eCommerce accounts.",
+            fixSteps: [
+              "Implement conversion value tracking — pass the transaction revenue amount for every purchase conversion.",
+              "Verify the Google Ads purchase tag fires with the correct value parameter on the order confirmation page.",
+              "Once value data has 30+ days of history, switch the primary bid strategy to Target ROAS.",
+            ],
+          })
+        );
+      }
+    }
+  }
+
+  // OPP-003: eCommerce Google with no Shopping or Performance Max campaign
+  if (audit.selectedPlatforms.includes("GOOGLE") && businessType === "eCommerce") {
+    const campaigns = getRecordsByLevel(dataset, "GOOGLE", "campaign");
+    if (campaigns.length > 0) {
+      const hasShoppingOrPmax = campaigns.some((c) => {
+        const t = text(c.type);
+        const n = text(c.name);
+        return (
+          t.includes("shopping") || t.includes("performance_max") || t.includes("pmax") ||
+          n.includes("shopping") || n.includes("pmax") || n.includes("performance max")
+        );
+      });
+      if (!hasShoppingOrPmax) {
+        findings.push(
+          createFinding({
+            ruleId: "OPP-003",
+            platform: "GOOGLE",
+            severity: "MEDIUM",
+            category: "Campaign Structure",
+            title: "eCommerce account has no Shopping or Performance Max campaign — major revenue channel missing",
+            detail: `Your ${campaigns.length} Google campaign(s) appear entirely Search-based — no Shopping or Performance Max campaigns are detected. For eCommerce, Shopping and PMax campaigns typically drive 40–60% of Google revenue because they show product images and prices directly in search results, capturing high-purchase-intent shoppers at the moment of decision.`,
+            evidence: { campaignCount: campaigns.length, shoppingOrPmaxDetected: false },
+            estimatedImpact: "Missing Shopping/PMax campaigns leaves a primary eCommerce revenue channel completely untapped.",
+            fixSteps: [
+              "Ensure your Google Merchant Center feed is verified and approved.",
+              "Create a Performance Max campaign with your product feed as the primary asset.",
+              "Allocate 15–20% of total Search budget to the initial PMax test.",
+              "Review PMax impression share and search term reports after 2–4 weeks.",
+            ],
+          })
+        );
+      }
+    }
+  }
+
+  // OPP-004: Single-platform account with budget sufficient for expansion
+  if (audit.selectedPlatforms.length === 1 && monthlyBudget >= 3000) {
+    const currentPlatform = audit.selectedPlatforms[0];
+    const suggestedPlatform =
+      currentPlatform === "META" ? "Google" : currentPlatform === "GOOGLE" ? "Meta" : "Meta";
+    findings.push(
+      createFinding({
+        ruleId: "OPP-004",
+        platform: currentPlatform,
+        severity: "LOW",
+        category: "Campaign Structure",
+        title: `Account runs on one platform at $${monthlyBudget.toLocaleString()}/month — ${suggestedPlatform} expansion is a growth lever`,
+        detail: `With a declared monthly budget of $${monthlyBudget.toLocaleString()}, this account has the scale to support multi-platform advertising. Single-platform accounts at this budget are exposed to auction volatility and miss audiences only accessible on other platforms.`,
+        evidence: { monthlyBudget, currentPlatform, suggestedPlatform },
+        estimatedImpact: `Allocating 15–20% of budget to ${suggestedPlatform} diversifies risk and opens new acquisition channels.`,
+        fixSteps: [
+          `Research ${suggestedPlatform} audience overlap with your current ${PLATFORM_LABELS[currentPlatform]} buyers.`,
+          `Start with a 30-day test at $${Math.round(monthlyBudget * 0.15).toLocaleString()}/month on ${suggestedPlatform} — retargeting your existing customer list first.`,
+          "Set clear ROAS/CPA targets before launching the test so you have an objective exit criterion.",
+        ],
+      })
+    );
+  }
+
+  // OPP-005: Meta with no upper-funnel campaigns (all conversion-objective)
+  if (audit.selectedPlatforms.includes("META")) {
+    const campaigns = getRecordsByLevel(dataset, "META", "campaign");
+    if (campaigns.length >= 3) {
+      const upperFunnelObjectives = ["awareness", "reach", "traffic", "engagement", "video_views", "video views"];
+      const hasUpperFunnel = campaigns.some((c) =>
+        upperFunnelObjectives.some((obj) => text(c.objective).includes(obj))
+      );
+      const allConversion = campaigns.every((c) => {
+        const obj = text(c.objective);
+        return obj.includes("conversion") || obj.includes("outcome_sales") || obj.includes("lead") || obj.includes("purchase");
+      });
+      if (!hasUpperFunnel && allConversion) {
+        const totalSpend = sumSpend(campaigns);
+        findings.push(
+          createFinding({
+            ruleId: "OPP-005",
+            platform: "META",
+            severity: "MEDIUM",
+            category: "Campaign Structure",
+            title: "All Meta campaigns are conversion-objective — no upper-funnel spend is building future demand",
+            detail: `All ${campaigns.length} Meta campaigns run conversion or lead objectives ($${Math.round(totalSpend).toLocaleString()} in detected spend). The account relies entirely on existing market awareness. As audiences saturate, CPAs rise because no fresh awareness traffic feeds the funnel. Retargeting pools shrink and prospecting CPAs climb without upper-funnel investment refreshing them.`,
+            evidence: {
+              campaignCount: campaigns.length,
+              totalSpend: Math.round(totalSpend),
+              upperFunnelCampaigns: 0,
+            },
+            estimatedImpact: "CPAs will continue rising as current audiences saturate without upper-funnel campaigns refreshing the prospecting pool.",
+            fixSteps: [
+              "Allocate 10–15% of Meta spend to a Reach or Traffic campaign targeting a broad cold audience.",
+              "Use this upper-funnel traffic as a retargeting audience for conversion campaigns (30/60/90-day windows).",
+              "Test video creative in the awareness campaign — cost-efficient for reach and builds brand recognition.",
+            ],
+          })
+        );
+      }
+    }
+  }
+
+  // OPP-006: High-QS Google keywords with minimal spend (undertapped efficiency)
+  if (audit.selectedPlatforms.includes("GOOGLE")) {
+    const keywords = getRecordsByLevel(dataset, "GOOGLE", "keyword");
+    if (keywords.length > 0) {
+      const highQsUnderused = keywords.filter((kw) => {
+        const qs = numberValue(kw.qualityScore);
+        const clicks = numberValue(kw.clicks);
+        const spend = numberValue(kw.spend);
+        return qs >= 8 && clicks < 30 && spend < 100;
+      });
+      if (highQsUnderused.length >= 2) {
+        findings.push(
+          createFinding({
+            ruleId: "OPP-006",
+            platform: "GOOGLE",
+            severity: "LOW",
+            category: "Keyword Strategy",
+            title: `${highQsUnderused.length} high-Quality Score keywords are under-budgeted — efficient clicks are being left on the table`,
+            detail: `${highQsUnderused.length} keyword(s) have a Quality Score of 8 or above but fewer than 30 clicks and under $100 in spend. High-QS keywords get cheaper CPCs and better ad positions — Google rewards relevance with lower auction prices. Constraining these keywords while spending on lower-QS terms is backwards budget allocation.`,
+            evidence: {
+              highQsUnderused: highQsUnderused.length,
+              examples: highQsUnderused.slice(0, 3).map((kw) => ({
+                keyword: kw.keyword,
+                qualityScore: kw.qualityScore,
+                clicks: kw.clicks,
+                spend: kw.spend,
+              })),
+            },
+            estimatedImpact: `Scaling budget to high-QS keywords delivers more clicks at lower CPC than your current keyword mix.`,
+            fixSteps: [
+              `Identify which campaigns contain the ${highQsUnderused.length} high-QS, low-spend keywords.`,
+              "Increase bids or campaign budgets to capture more impression share for these keywords.",
+              "Check whether these campaigns are losing impression share to budget constraints.",
+            ],
+          })
+        );
+      }
+    }
+  }
+};
+
+const addCompoundFindings = ({ audit, findings }) => {
+  // COMP-TRK-001: Three or more tracking failures on the same platform — compound critical
+  for (const platform of audit.selectedPlatforms) {
+    const trackingFindings = findings.filter(
+      (f) =>
+        f.platform === platform &&
+        (f.ruleId.startsWith("BP-TRK") ||
+          f.ruleId.startsWith("TRK") ||
+          f.category === getTrackingCategory(platform))
+    );
+
+    if (trackingFindings.length >= 3) {
+      const alreadyHasCompound = findings.some(
+        (f) => f.ruleId === "COMP-TRK-001" && f.platform === platform
+      );
+      if (!alreadyHasCompound) {
+        findings.push(
+          createFinding({
+            ruleId: "COMP-TRK-001",
+            platform,
+            severity: "CRITICAL",
+            category: getTrackingCategory(platform),
+            title: `${PLATFORM_LABELS[platform]} has ${trackingFindings.length} simultaneous tracking failures — all performance data is unreliable`,
+            detail: `The audit detected ${trackingFindings.length} independent tracking issues on ${PLATFORM_LABELS[platform]}: ${trackingFindings.map((f) => f.title).join("; ")}. When multiple tracking layers fail simultaneously, every CPA, ROAS, and conversion metric in this report is unreliable. The algorithm is optimising toward false signals — you may be scaling campaigns that are losing money and cutting campaigns that are actually profitable.`,
+            evidence: {
+              trackingFindingCount: trackingFindings.length,
+              affectedRuleIds: trackingFindings.map((f) => f.ruleId),
+            },
+            estimatedImpact: "CRITICAL: All optimisation decisions on this platform are being made on corrupted data. Fix tracking before acting on any other finding.",
+            fixSteps: [
+              `Resolve each tracking finding in this report before taking any other action on ${PLATFORM_LABELS[platform]}.`,
+              "Install the platform's browser debugging extension and verify events fire on your key conversion pages.",
+              "Run a traffic test with UTM parameters and verify the full funnel appears in your analytics.",
+              "Consider a dedicated tracking audit before making any bid strategy or budget changes.",
+            ],
+          })
+        );
+      }
     }
   }
 };
@@ -1127,6 +2323,10 @@ export const runDeterministicAudit = (audit) => {
     addTikTokFindings({ audit, dataset, findings });
   }
   addDataQualityFindings({ audit, dataset, findings });
+  addBusinessProfileFindings({ audit, dataset, findings });
+  addBenchmarkFindings({ audit, dataset, findings });
+  addOpportunityFindings({ audit, dataset, findings });
+  addCompoundFindings({ audit, findings });
 
   const scores = calculateScores({ audit, findings });
   const report = buildDeterministicSummary({ audit, dataset, findings, scores });
