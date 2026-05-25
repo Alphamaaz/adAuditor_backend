@@ -1,3 +1,4 @@
+import { randomBytes, createHash } from "crypto";
 import axios from "axios";
 import { prisma } from "../../lib/prisma.js";
 import {
@@ -262,9 +263,10 @@ export const login = async (req, res) => {
     },
   });
 
-  // Google-only accounts have no password — give a helpful message.
+  // Social-only accounts have no password — give a helpful message.
   if (user && !user.passwordHash) {
-    throw unauthorized("This account uses Google Sign-In. Please continue with Google.");
+    const providers = [user.googleId && "Google", user.metaId && "Meta (Facebook)", user.tiktokId && "TikTok"].filter(Boolean).join(" or ");
+    throw unauthorized(`This account uses ${providers || "social"} sign-in. Please use the social login button instead.`);
   }
 
   const isValidPassword =
@@ -388,7 +390,7 @@ export const changePassword = async (req, res) => {
   const user = req.user;
 
   if (!user.passwordHash) {
-    throw badRequest("Your account uses Google Sign-In and does not have a password.");
+    throw badRequest("Your account uses social sign-in and does not have a password.");
   }
 
   const isValid = await verifyPassword(currentPassword, user.passwordHash);
@@ -486,6 +488,220 @@ export const revokeOtherSessions = async (req, res) => {
       revokedCount: result.count,
     },
   });
+};
+
+// ── Social OAuth helpers ──────────────────────────────────────────────────────
+
+const STATE_COOKIE_OPTS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "lax",
+  maxAge: 10 * 60 * 1000,
+  path: "/",
+};
+
+const socialLoginRedirect = (res, user) => {
+  const isSuperAdmin = user.internalRole === "SUPER_ADMIN";
+  const hasProfile = !!user.memberships?.[0]?.organization?.businessProfile;
+  const dest = isSuperAdmin ? "/admin" : hasProfile ? "/dashboard" : "/onboarding";
+  res.redirect(`${process.env.CLIENT_ORIGIN}${dest}`);
+};
+
+const upsertSocialUser = async (tx, req, { field, id, email, name }) => {
+  let user = await tx.user.findFirst({
+    where: { OR: [{ [field]: id }, { email }] },
+  });
+
+  if (user?.status === "SUSPENDED") {
+    throw forbidden("Your account has been suspended. Please contact support.");
+  }
+
+  if (!user) {
+    user = await tx.user.create({
+      data: {
+        email,
+        name: name || email.split("@")[0],
+        [field]: id,
+        status: "ACTIVE",
+        emailVerifiedAt: new Date(),
+      },
+    });
+
+    const organization = await tx.organization.create({
+      data: { name: `${name || email}'s Organization`, ownerId: user.id },
+    });
+
+    await tx.organizationMember.create({
+      data: { userId: user.id, organizationId: organization.id, role: "OWNER" },
+    });
+
+    await tx.subscription.create({
+      data: { organizationId: organization.id, status: "TRIALING" },
+    });
+  } else if (!user[field]) {
+    user = await tx.user.update({
+      where: { id: user.id },
+      data: {
+        [field]: id,
+        emailVerifiedAt: user.emailVerifiedAt ?? new Date(),
+        status: user.status === "PENDING" ? "ACTIVE" : user.status,
+      },
+    });
+  }
+
+  await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+
+  const token = await createSession(tx, req, user.id);
+  const fullUser = await fetchUserWithMemberships(tx, user.id);
+  return { token, user: fullUser };
+};
+
+// ── Meta OAuth ────────────────────────────────────────────────────────────────
+
+export const metaInit = async (req, res) => {
+  const state = randomBytes(16).toString("hex");
+  res.cookie("meta_auth_state", state, STATE_COOKIE_OPTS);
+
+  const params = new URLSearchParams({
+    client_id: process.env.META_APP_ID,
+    redirect_uri: process.env.META_AUTH_CALLBACK,
+    scope: "email,public_profile",
+    state,
+    response_type: "code",
+  });
+
+  res.redirect(`https://www.facebook.com/v21.0/dialog/oauth?${params}`);
+};
+
+export const metaCallback = async (req, res) => {
+  const { code, state, error: oauthError } = req.query;
+  const storedState = req.cookies?.meta_auth_state;
+  res.clearCookie("meta_auth_state", { path: "/" });
+
+  if (oauthError || !code || !state || state !== storedState) {
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=meta_auth_failed`);
+  }
+
+  let accessToken;
+  try {
+    const { data } = await axios.get("https://graph.facebook.com/v21.0/oauth/access_token", {
+      params: {
+        client_id: process.env.META_APP_ID,
+        client_secret: process.env.META_APP_SECRET,
+        redirect_uri: process.env.META_AUTH_CALLBACK,
+        code,
+      },
+    });
+    accessToken = data.access_token;
+  } catch {
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=meta_token_failed`);
+  }
+
+  let metaUser;
+  try {
+    const { data } = await axios.get("https://graph.facebook.com/me", {
+      params: { fields: "id,name,email", access_token: accessToken },
+    });
+    metaUser = data;
+  } catch {
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=meta_userinfo_failed`);
+  }
+
+  const { id: metaId, email, name } = metaUser;
+
+  if (!email) {
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=meta_no_email`);
+  }
+
+  const result = await prisma.$transaction((tx) =>
+    upsertSocialUser(tx, req, { field: "metaId", id: metaId, email, name })
+  );
+
+  setSessionCookie(res, result.token);
+  socialLoginRedirect(res, result.user);
+};
+
+// ── TikTok OAuth ──────────────────────────────────────────────────────────────
+
+const generateCodeVerifier = () => randomBytes(32).toString("base64url");
+const generateCodeChallenge = (verifier) =>
+  createHash("sha256").update(verifier).digest("base64url");
+
+export const tiktokInit = async (req, res) => {
+  const state = randomBytes(16).toString("hex");
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = generateCodeChallenge(codeVerifier);
+
+  res.cookie("tiktok_auth_state", state, STATE_COOKIE_OPTS);
+  res.cookie("tiktok_code_verifier", codeVerifier, STATE_COOKIE_OPTS);
+
+  const params = new URLSearchParams({
+    client_key: process.env.TIKTOK_APP_ID,
+    redirect_uri: process.env.TIKTOK_AUTH_CALLBACK,
+    scope: "user.info.basic,user.info.email",
+    state,
+    response_type: "code",
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+  });
+
+  res.redirect(`https://www.tiktok.com/v2/auth/authorize/?${params}`);
+};
+
+export const tiktokCallback = async (req, res) => {
+  const { code, state, error: oauthError } = req.query;
+  const storedState = req.cookies?.tiktok_auth_state;
+  const codeVerifier = req.cookies?.tiktok_code_verifier;
+
+  res.clearCookie("tiktok_auth_state", { path: "/" });
+  res.clearCookie("tiktok_code_verifier", { path: "/" });
+
+  if (oauthError || !code || !state || state !== storedState || !codeVerifier) {
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=tiktok_auth_failed`);
+  }
+
+  let tiktokTokens;
+  try {
+    const { data } = await axios.post(
+      "https://open.tiktokapis.com/v2/oauth/token/",
+      new URLSearchParams({
+        client_key: process.env.TIKTOK_APP_ID,
+        client_secret: process.env.TIKTOK_APP_SECRET,
+        code,
+        grant_type: "authorization_code",
+        redirect_uri: process.env.TIKTOK_AUTH_CALLBACK,
+        code_verifier: codeVerifier,
+      }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+    tiktokTokens = data;
+  } catch {
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=tiktok_token_failed`);
+  }
+
+  let tiktokUser;
+  try {
+    const { data } = await axios.get("https://open.tiktokapis.com/v2/user/info/", {
+      params: { fields: "open_id,display_name,email" },
+      headers: { Authorization: `Bearer ${tiktokTokens.access_token}` },
+    });
+    tiktokUser = data.data?.user;
+  } catch {
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=tiktok_userinfo_failed`);
+  }
+
+  const { open_id: tiktokId, display_name: name, email } = tiktokUser;
+
+  if (!email) {
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=tiktok_no_email`);
+  }
+
+  const result = await prisma.$transaction((tx) =>
+    upsertSocialUser(tx, req, { field: "tiktokId", id: tiktokId, email, name })
+  );
+
+  setSessionCookie(res, result.token);
+  socialLoginRedirect(res, result.user);
 };
 
 export const googleAuth = async (req, res) => {

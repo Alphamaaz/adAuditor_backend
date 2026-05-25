@@ -28,6 +28,10 @@ import {
   listSessions,
   revokeOtherSessions,
   googleAuth,
+  metaInit,
+  metaCallback,
+  tiktokInit,
+  tiktokCallback,
 } from "./auth.controller.js";
 
 const router = Router();
@@ -76,6 +80,14 @@ router.post(
   validateBody(resetPasswordSchema),
   asyncHandler(resetPassword)
 );
+
+// Meta OAuth
+router.get("/meta/init", asyncHandler(metaInit));
+router.get("/meta/callback", asyncHandler(metaCallback));
+
+// TikTok OAuth
+router.get("/tiktok/init", asyncHandler(tiktokInit));
+router.get("/tiktok/callback", asyncHandler(tiktokCallback));
 
 // Protected routes
 router.get("/me", requireAuth, asyncHandler(getCurrentUser));
