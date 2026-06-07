@@ -7,6 +7,12 @@ export const aiReportJsonSchema = {
     "quickWins",
     "confidenceNotes",
     "clientReadyRecommendations",
+    "auditNarrativeVersion",
+    "dataConfidenceSummary",
+    "segmentInsights",
+    "comparisonInsights",
+    "memoryInsights",
+    "risksAndAssumptions",
   ],
   properties: {
     executiveSummary: {
@@ -108,5 +114,13 @@ export const aiReportJsonSchema = {
         },
       },
     },
+    // ── v2 evidence-packet fields (additive; OpenAI-strict-safe: required +
+    //    nullable/empty-array tolerant). Older reports without them still load. ──
+    auditNarrativeVersion: { type: "string" },
+    dataConfidenceSummary: { type: ["string", "null"] },
+    segmentInsights: { type: "array", maxItems: 5, items: { type: "string" } },
+    comparisonInsights: { type: "array", maxItems: 3, items: { type: "string" } },
+    memoryInsights: { type: "array", maxItems: 3, items: { type: "string" } },
+    risksAndAssumptions: { type: "array", maxItems: 4, items: { type: "string" } },
   },
 };

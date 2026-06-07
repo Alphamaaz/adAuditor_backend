@@ -216,6 +216,24 @@ export const normalizeAudienceBidding = (rows) =>
 const sumField = (records, field) =>
   records.reduce((total, r) => total + (r[field] || 0), 0);
 
+const microsToUnits = (micros) => {
+  const n = Number(micros);
+  return Number.isFinite(n) ? Math.round((n / 1_000_000) * 100) / 100 : 0;
+};
+
+/**
+ * Normalize Google daily segment rows (segments.date) into byDay records.
+ */
+export const normalizeGoogleDailySegments = (rows = []) =>
+  rows.map((row) => ({
+    date: row.segments?.date || null,
+    spend: microsToUnits(row.metrics?.costMicros),
+    impressions: Number(row.metrics?.impressions || 0),
+    clicks: Number(row.metrics?.clicks || 0),
+    conversions: Number(row.metrics?.conversions || 0),
+    convValue: Number(row.metrics?.conversionsValue || 0),
+  }));
+
 export const buildGoogleNormalizedDataset = ({
   campaignRecords,
   adGroupRecords,
@@ -227,6 +245,7 @@ export const buildGoogleNormalizedDataset = ({
   shoppingProductRecords = [],
   audienceBiddingRecords = [],
   currency,
+  byDay = [],
 }) => {
   const allRecords = [
     ...campaignRecords,
@@ -271,6 +290,8 @@ export const buildGoogleNormalizedDataset = ({
           files: [],
           records: allRecords,
           byLevel,
+          byDimension: {},
+          byDay: Array.isArray(byDay) ? byDay : [],
           currency: currency || null,
           source: "OAUTH",
         },

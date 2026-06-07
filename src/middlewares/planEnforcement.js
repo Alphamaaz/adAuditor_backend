@@ -1,11 +1,20 @@
-import { paymentRequired, badRequest } from "../utils/appError.js";
+import { paymentRequired, badRequest, serviceUnavailable } from "../utils/appError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { getOrganizationId } from "../utils/requestContext.js";
 import {
   FREE_PLAN_FALLBACK,
   getOrCreateCurrentUsageCounter,
   resolveEffectivePlan,
+  resolveCurrentUsagePeriod,
 } from "../modules/plans/plan.resolver.js";
+import {
+  sumOrgAiCostUsd,
+  sumGlobalAiCostUsd,
+} from "../modules/audits/aiUsage.service.js";
+import {
+  sumOrgStorageBytes,
+  bytesToMb,
+} from "../modules/audits/storageUsage.service.js";
 
 /**
  * Attaches { plan, planSource, subscription, usageCounter } to req for the
@@ -114,6 +123,91 @@ export const enforceAuditRunLimits = [
  * Optional check: ensure the requested data source is allowed by the plan.
  * Manual upload is always allowed; OAuth requires features.oauthConnections.
  */
+/**
+ * Cost cap enforcement for AI-driven endpoints.
+ *
+ * Two ceilings, both must hold:
+ *   1. Per-org monthly cap (plan.aiMonthlyUsdCap, falls back to free-plan default)
+ *   2. Global daily cap (AI_GLOBAL_DAILY_USD_CAP env var) — defends against
+ *      account-wide abuse / runaway prompts
+ *
+ * Run AFTER attachEffectivePlan so req.subscription is available.
+ */
+export const enforceAiCostCap = asyncHandler(async (req, _res, next) => {
+  const organizationId = getOrganizationId(req);
+  const cap =
+    req.effectivePlan?.aiMonthlyUsdCap != null
+      ? Number(req.effectivePlan.aiMonthlyUsdCap)
+      : FREE_PLAN_FALLBACK.aiMonthlyUsdCap;
+
+  if (cap != null && Number.isFinite(cap)) {
+    const { periodStart, periodEnd } = resolveCurrentUsagePeriod(
+      req.subscription
+    );
+    const used = await sumOrgAiCostUsd({
+      organizationId,
+      since: periodStart,
+      until: periodEnd,
+    });
+    if (used >= cap) {
+      throw paymentRequired(
+        `Monthly AI spend cap reached for your plan ($${cap.toFixed(2)}). ` +
+          `Upgrade or wait until the next billing period.`,
+        {
+          plan: req.effectivePlan?.slug || "free",
+          capUsd: cap,
+          usedUsd: Number(used.toFixed(2)),
+          periodStart,
+          periodEnd,
+        }
+      );
+    }
+  }
+
+  const globalCap = Number(process.env.AI_GLOBAL_DAILY_USD_CAP || 0);
+  if (globalCap > 0) {
+    const todayStart = new Date();
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const globalUsed = await sumGlobalAiCostUsd({ since: todayStart });
+    if (globalUsed >= globalCap) {
+      throw serviceUnavailable(
+        "Global AI processing capacity reached for today. " +
+          "Try again tomorrow or contact support.",
+        { globalCapUsd: globalCap, globalUsedUsd: Number(globalUsed.toFixed(2)) }
+      );
+    }
+  }
+
+  next();
+});
+
+/**
+ * Storage cap enforcement. Reject uploads when the org has hit its
+ * cumulative storage quota. Run BEFORE multer to avoid wasting disk on
+ * a file we're going to reject.
+ */
+export const enforceStorageCap = asyncHandler(async (req, _res, next) => {
+  const organizationId = getOrganizationId(req);
+  const capMb =
+    req.effectivePlan?.storageMbCap ?? FREE_PLAN_FALLBACK.storageMbCap;
+  if (capMb == null) return next(); // unlimited
+
+  const usedBytes = await sumOrgStorageBytes({ organizationId });
+  const usedMb = bytesToMb(usedBytes);
+  if (usedMb >= capMb) {
+    throw paymentRequired(
+      `Storage cap reached for your plan (${capMb} MB). ` +
+        `Delete old audits or upgrade for more space.`,
+      {
+        plan: req.effectivePlan?.slug || "free",
+        capMb,
+        usedMb: Number(usedMb.toFixed(2)),
+      }
+    );
+  }
+  next();
+});
+
 export const enforceDataSourceAllowed = asyncHandler(
   async (req, _res, next) => {
     const dataSource = req.body?.dataSource;

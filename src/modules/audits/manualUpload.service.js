@@ -356,6 +356,16 @@ const COST_PER_PURCHASE_ALIASES = [
   /^cost per result/i,
   "Cost per results",
 ];
+// Objective-spanning result columns. "Results" is Meta's own pre-computed,
+// objective-aware count (purchases, leads, or messaging conversations); the
+// rest are fallbacks for exports that use an objective-specific column name.
+const META_RESULT_ALIASES = [
+  "Results",
+  "Purchases",
+  "Leads",
+  "Total messaging contacts",
+  "Messaging conversations started",
+];
 
 const normalizeMetaCampaign = (rows) =>
   rows.map((row) => ({
@@ -370,9 +380,7 @@ const normalizeMetaCampaign = (rows) =>
     impressions: parseNumber(getValue(row, ["Impressions"])),
     reach: parseNumber(getValue(row, ["Reach"])),
     clicks: parseNumber(getValue(row, ["Link clicks", "Clicks (all)", "Clicks"])),
-    results: parseNumber(
-      getValue(row, ["Results", "Purchases", "Total messaging contacts"])
-    ),
+    results: parseNumber(getValue(row, META_RESULT_ALIASES)),
     cpa: parseNumber(getValue(row, COST_PER_PURCHASE_ALIASES)),
     roas: parseNumber(
       getValue(row, ["Purchase ROAS", "Website purchase ROAS"])
@@ -397,7 +405,7 @@ const normalizeMetaAdSet = (rows) =>
     reach: parseNumber(getValue(row, ["Reach"])),
     frequency: parseNumber(getValue(row, ["Frequency"])),
     clicks: parseNumber(getValue(row, ["Link clicks", "Clicks (all)", "Clicks"])),
-    results: parseNumber(getValue(row, ["Results", "Purchases"])),
+    results: parseNumber(getValue(row, META_RESULT_ALIASES)),
     cpa: parseNumber(getValue(row, COST_PER_PURCHASE_ALIASES)),
     roas: parseNumber(getValue(row, ["Purchase ROAS"])),
     audienceSize: getValue(row, ["Audience size", "Estimated audience size"]),
@@ -418,9 +426,7 @@ const normalizeMetaAd = (rows) =>
     frequency: parseNumber(getValue(row, ["Frequency"])),
     clicks: parseNumber(getValue(row, ["Link clicks", "Clicks (all)", "Clicks"])),
     ctr: parseNumber(getValue(row, ["CTR (link click-through rate)", "CTR (all)", "CTR"])),
-    results: parseNumber(
-      getValue(row, ["Results", "Purchases", "Total messaging contacts"])
-    ),
+    results: parseNumber(getValue(row, META_RESULT_ALIASES)),
     cpa: parseNumber(getValue(row, COST_PER_PURCHASE_ALIASES)),
     qualityRanking: getValue(row, ["Quality ranking"]),
     engagementRanking: getValue(row, ["Engagement rate ranking"]),
@@ -752,6 +758,98 @@ const summarizeRecords = (platform, records, currency) => ({
   currency,
 });
 
+// ── Dimension/time-series breakdown detection (CSV) ─────────────────────────
+// A breakdown export (e.g. Meta "Age" or "Placement") carries a demographic /
+// placement / device / region column alongside metrics. These columns never
+// appear in normal entity exports, so detecting them is safe — when absent,
+// byDimension stays empty and existing uploads are unaffected.
+
+const DIMENSION_ALIASES = {
+  age: ["Age", "Age range", "Age Range"],
+  gender: ["Gender"],
+  placement: ["Placement", "Publisher platform", "Publisher Platform", "Platform position", "Platform Position"],
+  device: ["Device", "Device platform", "Device Platform", "Impression device"],
+  region: ["Region", "Country", "Geo", "DMA region", "DMA Region"],
+};
+
+const ENTITY_NAME_ALIASES = [
+  "Campaign name", "Campaign", "Ad name", "Ad set name", "Ad group", "Ad Group",
+  "Keyword", "Search term", "Search Term",
+];
+
+const DAY_ALIASES = ["Day", "Date"];
+
+const metricValue = (row, kind) => {
+  if (kind === "spend") return parseNumber(getValue(row, [...AMOUNT_SPENT_ALIASES, "Cost", "Spend"]));
+  if (kind === "impressions") return parseNumber(getValue(row, ["Impressions", "Impr.", "Impr"]));
+  if (kind === "clicks") return parseNumber(getValue(row, ["Link clicks", "Clicks (all)", "Clicks"]));
+  if (kind === "conversions")
+    return parseNumber(
+      getValue(row, ["Conversions", "Results", "Purchases", "Total messaging contacts"])
+    );
+  return null;
+};
+
+const hasColumn = (headers, aliases) =>
+  aliases.some((a) => headers.some((h) => headerKey(h) === headerKey(a)));
+
+/**
+ * Extract byDimension + byDay from parsed rows when breakdown/time-series
+ * columns are present. Aggregates by segment so multi-row inputs collapse
+ * correctly. Returns { byDimension: {dim:[...]}, byDay: [...] } — both may be empty.
+ */
+export const extractBreakdowns = (rows) => {
+  const byDimension = {};
+  const byDay = [];
+  if (!Array.isArray(rows) || rows.length === 0) return { byDimension, byDay };
+
+  const headers = getHeaders(rows);
+  const hasEntity = hasColumn(headers, ENTITY_NAME_ALIASES);
+
+  // Dimensions — safe whenever a recognized breakdown column exists.
+  for (const [dimension, aliases] of Object.entries(DIMENSION_ALIASES)) {
+    if (!hasColumn(headers, aliases)) continue;
+    const bySegment = new Map();
+    for (const row of rows) {
+      const segRaw = getValue(row, aliases);
+      const segment = segRaw != null && String(segRaw).trim() ? String(segRaw).trim() : "unknown";
+      const acc =
+        bySegment.get(segment) ||
+        { dimension, segment, spend: 0, impressions: 0, clicks: 0, conversions: 0 };
+      acc.spend += metricValue(row, "spend") || 0;
+      acc.impressions += metricValue(row, "impressions") || 0;
+      acc.clicks += metricValue(row, "clicks") || 0;
+      acc.conversions += metricValue(row, "conversions") || 0;
+      bySegment.set(segment, acc);
+    }
+    const seg = [...bySegment.values()].map((s) => ({ ...s, results: s.conversions }));
+    if (seg.length > 0) byDimension[dimension] = seg;
+  }
+
+  // Daily series — ONLY for account-level daily exports (a Day/Date column and
+  // NO entity-name column). Guards against treating a campaign report's date
+  // columns as a time series.
+  if (!hasEntity && hasColumn(headers, DAY_ALIASES)) {
+    const byDate = new Map();
+    for (const row of rows) {
+      const dRaw = getValue(row, DAY_ALIASES);
+      const date = dRaw != null ? String(dRaw).trim() : "";
+      if (!date) continue;
+      const acc =
+        byDate.get(date) ||
+        { date, spend: 0, impressions: 0, clicks: 0, conversions: 0 };
+      acc.spend += metricValue(row, "spend") || 0;
+      acc.impressions += metricValue(row, "impressions") || 0;
+      acc.clicks += metricValue(row, "clicks") || 0;
+      acc.conversions += metricValue(row, "conversions") || 0;
+      byDate.set(date, acc);
+    }
+    byDay.push(...[...byDate.values()].map((d) => ({ ...d, results: d.conversions })));
+  }
+
+  return { byDimension, byDay };
+};
+
 export const parseAndNormalizeUpload = async ({
   filePath,
   originalName,
@@ -768,12 +866,14 @@ export const parseAndNormalizeUpload = async ({
   const records = normalizeRows(platform, reportType, rows);
   const summary = summarizeRecords(platform, records, validation.currency);
   const level = getReportLevel(platform, reportType);
+  const breakdowns = extractBreakdowns(rows);
 
   return {
     validation,
     records,
     summary,
     level,
+    breakdowns,
   };
 };
 
@@ -786,6 +886,11 @@ const emptyPlatformShape = () => ({
   files: [],
   records: [],
   byLevel: {},
+  // Forward-compatible structure for dimension breakdowns + daily series.
+  // Populated when breakdown/time-series reports are available (CSV or OAuth);
+  // safe empty defaults otherwise so existing rules are unaffected.
+  byDimension: {},
+  byDay: {},
   currency: null,
 });
 
@@ -808,6 +913,7 @@ export const mergeNormalizedDataset = ({
   records,
   uploadSummary,
   level,
+  breakdowns,
 }) => {
   const existingData = existingDataset?.data || { platforms: {} };
   const existingSummary = existingDataset?.summary || {
@@ -832,6 +938,18 @@ export const mergeNormalizedDataset = ({
     if (!nextByLevel[recordLevel]) nextByLevel[recordLevel] = [];
     nextByLevel[recordLevel].push(record);
   });
+
+  // Merge any detected dimension breakdowns + daily series (CSV). Each new
+  // dimension replaces the prior bucket for that dimension (latest upload wins);
+  // byDay is appended. Both default empty so non-breakdown uploads are no-ops.
+  const nextByDimension = { ...(platformData.byDimension || {}) };
+  for (const [dim, seg] of Object.entries(breakdowns?.byDimension || {})) {
+    if (Array.isArray(seg) && seg.length > 0) nextByDimension[dim] = seg;
+  }
+  const nextByDay = [
+    ...(Array.isArray(platformData.byDay) ? platformData.byDay : []),
+    ...(Array.isArray(breakdowns?.byDay) ? breakdowns.byDay : []),
+  ];
 
   const nextPlatformSummary = {
     ...platformSummary,
@@ -862,6 +980,8 @@ export const mergeNormalizedDataset = ({
         ],
         records: [...(platformData.records || []), ...records],
         byLevel: nextByLevel,
+        byDimension: nextByDimension,
+        byDay: nextByDay,
         currency: platformData.currency || uploadSummary.currency || null,
       },
     },

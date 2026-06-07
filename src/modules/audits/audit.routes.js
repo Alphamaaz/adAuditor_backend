@@ -2,9 +2,12 @@ import { Router } from "express";
 import { requireAuth } from "../../middlewares/auth.js";
 import { validateBody } from "../../middlewares/validate.js";
 import {
+  attachEffectivePlan,
+  enforceAiCostCap,
   enforceAuditRunLimits,
   enforceAuditSetupLimits,
   enforceDataSourceAllowed,
+  enforceStorageCap,
 } from "../../middlewares/planEnforcement.js";
 import {
   expensiveRateLimit,
@@ -26,6 +29,7 @@ import {
   listAdAccounts,
   listAudits,
   runAudit,
+  runDeepAuditReport,
   submitPlatformIntake,
   uploadManualAuditFile,
 } from "./audit.controller.js";
@@ -54,6 +58,8 @@ router.post(
 router.post(
   "/:auditId/uploads",
   uploadRateLimit,
+  attachEffectivePlan,
+  enforceStorageCap,
   uploadAuditFile,
   asyncHandler(uploadManualAuditFile)
 );
@@ -66,7 +72,16 @@ router.post(
 router.post(
   "/:auditId/ai-report",
   expensiveRateLimit,
+  attachEffectivePlan,
+  enforceAiCostCap,
   asyncHandler(generateAiReport)
+);
+router.post(
+  "/:auditId/deep-audit",
+  expensiveRateLimit,
+  attachEffectivePlan,
+  enforceAiCostCap,
+  asyncHandler(runDeepAuditReport)
 );
 router.post("/:auditId/pdf", asyncHandler(generatePdfReport));
 router.get("/:auditId/pdf/:pdfReportId/download", asyncHandler(downloadPdfReport));

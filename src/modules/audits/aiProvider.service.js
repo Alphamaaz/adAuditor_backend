@@ -1,10 +1,47 @@
 import { serviceUnavailable } from "../../utils/appError.js";
 import { aiReportJsonSchema } from "./aiReport.schema.js";
+import { recordAiUsage } from "./aiUsage.service.js";
+import { redactContext } from "./piiRedaction.service.js";
+
+const extractTokens = ({ provider, responseBody }) => {
+  if (!responseBody) return { inputTokens: 0, outputTokens: 0 };
+  if (provider === "openai") {
+    const u = responseBody.usage || {};
+    return {
+      inputTokens: Number(u.input_tokens || u.prompt_tokens || 0),
+      outputTokens: Number(u.output_tokens || u.completion_tokens || 0),
+    };
+  }
+  if (provider === "deepseek") {
+    const u = responseBody.usage || {};
+    return {
+      inputTokens: Number(u.prompt_tokens || 0),
+      outputTokens: Number(u.completion_tokens || 0),
+    };
+  }
+  if (provider === "gemini") {
+    const u = responseBody.usageMetadata || {};
+    return {
+      inputTokens: Number(u.promptTokenCount || 0),
+      outputTokens: Number(u.candidatesTokenCount || 0),
+    };
+  }
+  if (provider === "anthropic") {
+    const u = responseBody.usage || {};
+    return {
+      inputTokens: Number(u.input_tokens || 0),
+      outputTokens: Number(u.output_tokens || 0),
+    };
+  }
+  return { inputTokens: 0, outputTokens: 0 };
+};
 
 const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const GEMINI_GENERATE_CONTENT_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta/models";
+const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_API_VERSION = "2023-06-01";
 
 const getAiConfig = () => ({
   provider: (process.env.AI_PROVIDER || "gemini").toLowerCase(),
@@ -26,6 +63,14 @@ const getGeminiConfig = () => ({
   apiKey: process.env.GEMINI_API_KEY,
   model: process.env.GEMINI_MODEL || "gemini-flash-latest",
   timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 45000),
+});
+
+const getAnthropicConfig = () => ({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
+  timeoutMs: Number(process.env.ANTHROPIC_TIMEOUT_MS || 60000),
+  maxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS || 4000),
+  temperature: Number(process.env.ANTHROPIC_TEMPERATURE || 0.2),
 });
 
 const withTimeout = (timeoutMs) => {
@@ -52,6 +97,53 @@ const parseGeminiResponseText = (responseBody) =>
     .filter(Boolean)
     .join("\n");
 
+const extractJsonObjectText = (text) => {
+  const cleaned = String(text || "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  if (!cleaned) return null;
+
+  const firstBrace = cleaned.indexOf("{");
+  if (firstBrace === -1) return cleaned;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = firstBrace; index < cleaned.length; index += 1) {
+    const char = cleaned[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return cleaned.slice(firstBrace, index + 1);
+    }
+  }
+
+  return cleaned;
+};
+
+const parseJsonObject = (text) => JSON.parse(extractJsonObjectText(text));
+
 // ── Prompt builders ───────────────────────────────────────────────────────────
 
 const buildSystemPrompt = () =>
@@ -77,7 +169,11 @@ WRITING RULES — follow these without exception:
 
 8. NO INVENTION: Never invent campaign names, dollar figures, CPAs, ROASes, CTRs, conversion counts, dates, or any metrics. Use ONLY what appears in the supplied audit context JSON. If a metric is not in the context, do not mention it.
 
-9. PRIOR AUDIT CONTEXT: If priorAudits contains data, reference it explicitly: "Your CPA has worsened from $X in your [date] audit to $Y now — a Z% deterioration." If it shows improvement, say so. Trend context is highly valuable to the client.`;
+9. PRIOR AUDIT CONTEXT: If priorAudits contains data, reference it explicitly using only the exact prior/current values already present in evidencePacket.comparison.selfOverTime. If those exact values are absent, describe the change without dollar amounts. Trend context is highly valuable to the client.
+
+10. EVIDENCE PACKET IS THE SOURCE OF TRUTH: The supplied context contains an "evidencePacket" object built by deterministic code. It is the authoritative source. Every dollar figure you cite MUST already appear in evidencePacket (in a finding's evidence/estimatedImpact, in evidencePacket.verifiedNumbers, or in evidencePacket.comparison). You must NOT compute, derive, sum, or estimate any new dollar amount, percentage, CPA, ROAS, or count. If a number is not in the packet, do not state it. The deterministic code has already done all arithmetic — your job is to explain and prioritize, never to calculate.
+
+11. PRIORITY ORDER: Rank and lead with findings in this order: (a) highest verified dollar impact (evidencePacket.topFindings are pre-sorted by estimatedImpactDollars — respect that order), (b) tracking/data-reliability issues (evidencePacket.dataConfidence), (c) segment-waste findings (SEG-WASTE-*), (d) peer-comparison gaps (evidencePacket.comparison.peer), (e) memory regression/improvement (evidencePacket.comparison.selfOverTime).`;
 
 const buildUserPrompt = (context) => {
   const bp = context?.audit?.businessProfileSnapshot?.sectionA || {};
@@ -85,6 +181,19 @@ const buildUserPrompt = (context) => {
   const healthScore = context?.audit?.healthScore ?? "N/A";
   const platforms = (context?.audit?.selectedPlatforms || []).join(", ");
   const hasPriorAudits = (context?.priorAudits || []).length > 0;
+  const promptEvidencePacket = context?.evidencePacket
+    ? {
+        ...context.evidencePacket,
+        // Keep raw aggregate rows out of the model prompt. They are useful to
+        // backend code, but they invite the model to calculate CPA/CPC/etc.
+        normalizedSummary: undefined,
+        priorAudits: undefined,
+        intakeResponses: undefined,
+      }
+    : null;
+  const allowedDollarAmounts = (context?.evidencePacket?.verifiedNumbers || [])
+    .map((n) => `$${Number(n).toLocaleString()}`)
+    .join(", ");
 
   const contextHints = [
     bp.targetCpa ? `• Declared target CPA: $${bp.targetCpa}` : "• Target CPA: not declared (use industry benchmarks)",
@@ -94,7 +203,6 @@ const buildUserPrompt = (context) => {
     bp.avgOrderValue ? `• Avg order value: $${bp.avgOrderValue}` : null,
     bp.blendedCac ? `• Blended CAC: $${bp.blendedCac}` : null,
     totals.spend ? `• Total spend in audit data: $${Math.round(totals.spend).toLocaleString()}` : null,
-    totals.conversions ? `• Total conversions in audit data: ${totals.conversions}` : null,
     `• Overall health score: ${healthScore}/100`,
     `• Platforms audited: ${platforms}`,
     hasPriorAudits ? `• Prior audit data available: YES — reference trends explicitly` : "• Prior audit data: none",
@@ -135,14 +243,27 @@ REQUIRED JSON OUTPUT:
       "nextSteps": ["specific step 1", "specific step 2"],
       "sourceRuleIds": ["RULE-ID-FROM-CONTEXT"]
     }
-  ]
+  ],
+  "auditNarrativeVersion": "v2-evidence-packet",
+  "dataConfidenceSummary": "one sentence on data reliability from evidencePacket.dataConfidence (or null)",
+  "segmentInsights": ["segment-level facts from SEG-WASTE-* findings, with the exact segment + dollar from evidence"],
+  "comparisonInsights": ["facts from evidencePacket.comparison.peer — name the peer account + the exact metric gap"],
+  "memoryInsights": ["facts from evidencePacket.comparison.selfOverTime — quote the exact delta vs the prior audit date"],
+  "risksAndAssumptions": ["any caveat: limited sample, missing targets, tracking unreliability — drawn from evidence sampleNote/confidence fields"]
 }
 
 SECTION-BY-SECTION INSTRUCTIONS:
 
+STRICT FACT CHECK BEFORE YOU RETURN:
+• Allowed dollar amounts for this response are ONLY: ${allowedDollarAmounts || "none"}.
+• Before returning JSON, scan every field you wrote. If any "$" amount is not exactly in that allowed list, remove it or replace it with a non-dollar phrase.
+• Do not write illustrative examples with dollar amounts.
+• Do not write "recovery", "savings", "overage", "per conversion", or "budget at risk" dollar estimates unless that exact dollar amount appears in the allowed list.
+• Do not calculate CPA, CPC, CPM, ROAS, budget, recovery, or percentage deltas from spend/click/conversion totals. Only repeat values already present in the evidence packet.
+
 executiveSummary (2 required, 3rd optional):
 • Para 1: Lead with the health score and what it signals. Quote the total spend reviewed ($${Math.round(totals.spend || 0).toLocaleString()}). Name the single most expensive problem with its exact dollar waste from the findings — do not bury the lead.
-• Para 2: Connect performance to declared goals. If BP-PERF-001 exists in ruleFindings, state the CPA gap in dollar and multiple terms using the evidence numbers. If BP-PERF-002 exists, state the ROAS shortfall. If any BP-TRK findings exist, warn that data reliability is compromised and CPA/ROAS figures cannot be fully trusted until tracking is fixed.${hasPriorAudits ? "\n• Para 3: Reference prior audit data to show whether performance is improving or deteriorating. Quote the specific metric change." : "\n• Para 3 (optional): Prognosis — what fixing the top 3 findings would recover mechanically (e.g. 'eliminating the $X in zero-conversion spend and fixing UTM tracking would improve attributable ROAS within 2-4 weeks')."}
+• Para 2: Connect performance to declared goals only when those exact goal values appear in the evidence packet. If BP-PERF-001 exists in ruleFindings, state the CPA gap only using evidence values. If BP-PERF-002 exists, state the ROAS shortfall only using evidence values. If any BP-TRK findings exist, warn that data reliability is compromised and CPA/ROAS figures cannot be fully trusted until tracking is fixed.${hasPriorAudits ? "\n• Para 3: Reference prior audit data to show whether performance is improving or deteriorating. Quote only the exact metric change already present in evidencePacket.comparison.selfOverTime." : "\n• Para 3 (optional): Prognosis — describe the expected operational improvement without adding any new dollar amount."}
 
 topPriorities (max 5, ranked by dollar impact, not severity label):
 • Only ruleIds that appear in ruleFindings
@@ -161,13 +282,35 @@ confidenceNotes:
 
 clientReadyRecommendations (3 to 5 items — written for the client to hand to their agency):
 • headline: short, direct, action-oriented — a sentence the client can put in a Slack message to their agency
-• explanation: 2-3 sentences with specific numbers — "Your Google account has 4 campaigns that spent $6,200 in the audit period with zero recorded conversions. This is direct, recoverable waste."
+• explanation: 2-3 sentences with exact evidence numbers only. Do not include made-up examples or newly calculated dollar amounts.
 • nextSteps: specific enough that a media buyer receiving this brief knows exactly what to do without needing to run their own analysis
 • sourceRuleIds: only rule IDs from ruleFindings
 
-FULL AUDIT CONTEXT JSON:
-${JSON.stringify(context)}`;
+segmentInsights (0 to 5 — only from SEG-WASTE-* findings if present):
+• Quote the exact segment + dimension + dollar from evidence: "The 45-54 age segment wasted $206 with zero conversions." Empty array if no segment findings.
+
+comparisonInsights (0 to 3 — only from evidencePacket.comparison.peer if present):
+• Name the peer account and the exact gap: "This account's CTR (1.0%) is 75% below your Best Account (4.0%) at the same spend band." Empty array if no peer.
+
+memoryInsights (0 to 3 — only from evidencePacket.comparison.selfOverTime if present):
+• Quote the exact delta vs the prior audit: "CPA worsened 100% (from $50 to $100) since your May 1 audit." Or improvement. Empty array if no prior audit.
+
+dataConfidenceSummary:
+• One sentence reflecting evidencePacket.dataConfidence. Null if unknown.
+
+risksAndAssumptions (1 to 4):
+• Surface any sampleNote/confidence caveats from the evidence so the client knows what is solid vs directional.
+
+EVIDENCE PACKET (authoritative source of truth — use ONLY numbers present here):
+${JSON.stringify(promptEvidencePacket)}
+
+SUPPORTING CONTEXT (audit metadata only — the evidencePacket above is canonical):
+${JSON.stringify({
+    audit: context?.audit,
+  })}`;
 };
+
+export const __test__ = { buildSystemPrompt, buildUserPrompt };
 
 // ── Provider implementations ──────────────────────────────────────────────────
 
@@ -231,7 +374,8 @@ const generateDeepSeekAuditReport = async ({ context }) => {
       provider: "deepseek",
       model: config.model,
       responseId: responseBody.id,
-      output: JSON.parse(content),
+      output: parseJsonObject(content),
+      usage: extractTokens({ provider: "deepseek", responseBody }),
     };
   } finally {
     timeout.clear();
@@ -299,7 +443,79 @@ const generateGeminiAuditReport = async ({ context }) => {
       provider: "gemini",
       model: config.model,
       responseId: responseBody.responseId,
-      output: JSON.parse(text),
+      output: parseJsonObject(text),
+      usage: extractTokens({ provider: "gemini", responseBody }),
+    };
+  } finally {
+    timeout.clear();
+  }
+};
+
+const generateAnthropicAuditReport = async ({ context }) => {
+  const config = getAnthropicConfig();
+
+  if (!config.apiKey) {
+    throw serviceUnavailable("Anthropic is not configured.", {
+      missingEnv: "ANTHROPIC_API_KEY",
+    });
+  }
+
+  const timeout = withTimeout(config.timeoutMs);
+
+  try {
+    const response = await fetch(ANTHROPIC_MESSAGES_URL, {
+      method: "POST",
+      signal: timeout.signal,
+      headers: {
+        "x-api-key": config.apiKey,
+        "anthropic-version": ANTHROPIC_API_VERSION,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: config.model,
+        max_tokens: config.maxTokens,
+        temperature: config.temperature,
+        system: buildSystemPrompt(),
+        messages: [
+          {
+            role: "user",
+            // Ask for a strict JSON object so we can parse the report shape.
+            content: `${buildUserPrompt(context)}\n\nRespond with ONLY a single valid JSON object matching the audit report schema. No markdown, no code fences, no prose outside the JSON.`,
+          },
+        ],
+      }),
+    });
+
+    const responseBody = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw serviceUnavailable("Anthropic report generation failed.", {
+        status: response.status,
+        response: responseBody,
+      });
+    }
+
+    // Messages API returns content as an array of blocks; concatenate text.
+    const text = Array.isArray(responseBody?.content)
+      ? responseBody.content
+          .filter((block) => block.type === "text")
+          .map((block) => block.text)
+          .join("")
+          .trim()
+      : null;
+
+    if (!text) {
+      throw serviceUnavailable("Anthropic response did not include text content.", {
+        responseId: responseBody?.id,
+      });
+    }
+
+    return {
+      provider: "anthropic",
+      model: config.model,
+      responseId: responseBody.id,
+      output: parseJsonObject(text),
+      usage: extractTokens({ provider: "anthropic", responseBody }),
     };
   } finally {
     timeout.clear();
@@ -369,29 +585,59 @@ const generateOpenAiAuditReport = async ({ context }) => {
       provider: "openai",
       model: config.model,
       responseId: responseBody.id,
-      output: JSON.parse(text),
+      output: parseJsonObject(text),
+      usage: extractTokens({ provider: "openai", responseBody }),
     };
   } finally {
     timeout.clear();
   }
 };
 
-export const generateAiAuditReport = async ({ context }) => {
+export const generateAiAuditReport = async ({
+  context,
+  auditId = null,
+  organizationId = null,
+  purpose = "audit_report",
+} = {}) => {
   const config = getAiConfig();
+  let providerCall;
+  if (config.provider === "gemini") providerCall = generateGeminiAuditReport;
+  else if (config.provider === "openai") providerCall = generateOpenAiAuditReport;
+  else if (config.provider === "deepseek") providerCall = generateDeepSeekAuditReport;
+  else if (config.provider === "anthropic") providerCall = generateAnthropicAuditReport;
+  else
+    throw serviceUnavailable("Unsupported AI provider.", {
+      provider: config.provider,
+    });
 
-  if (config.provider === "gemini") {
-    return generateGeminiAuditReport({ context });
+  const safeContext = redactContext(context);
+
+  try {
+    const result = await providerCall({ context: safeContext });
+    // Best-effort cost tracking. Never blocks the audit.
+    await recordAiUsage({
+      organizationId,
+      auditId: auditId ?? context?.audit?.id ?? null,
+      provider: result.provider,
+      model: result.model,
+      purpose,
+      inputTokens: result.usage?.inputTokens ?? 0,
+      outputTokens: result.usage?.outputTokens ?? 0,
+      status: "SUCCESS",
+    });
+    return result;
+  } catch (err) {
+    await recordAiUsage({
+      organizationId,
+      auditId: auditId ?? context?.audit?.id ?? null,
+      provider: config.provider,
+      model: "unknown",
+      purpose,
+      inputTokens: 0,
+      outputTokens: 0,
+      status: "ERROR",
+      errorMessage: err?.message?.slice(0, 500) ?? null,
+    });
+    throw err;
   }
-
-  if (config.provider === "openai") {
-    return generateOpenAiAuditReport({ context });
-  }
-
-  if (config.provider === "deepseek") {
-    return generateDeepSeekAuditReport({ context });
-  }
-
-  throw serviceUnavailable("Unsupported AI provider.", {
-    provider: config.provider,
-  });
 };

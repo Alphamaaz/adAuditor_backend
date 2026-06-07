@@ -1,4 +1,5 @@
 import { prisma } from "../../lib/prisma.js";
+import { deriveKpis } from "../../lib/comparison/auditComparison.js";
 
 /**
  * Build a compact, durable summary of a completed audit. The shape is
@@ -21,14 +22,28 @@ const countBy = (items, getKey) =>
     return acc;
   }, {});
 
+const parseImpactDollars = (impact) => {
+  if (typeof impact !== "string") return 0;
+  const match = impact.match(/\$\s?([\d,]+(?:\.\d+)?)/);
+  if (!match) return 0;
+  const n = Number(match[1].replace(/,/g, ""));
+  return Number.isFinite(n) ? Math.round(n) : 0;
+};
+
 const topRules = (findings, limit = 5) => {
   const severityRank = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+  // Rank by dollar impact first, then severity — matches the evidence packet.
   return [...findings]
-    .sort(
-      (left, right) =>
+    .sort((left, right) => {
+      const dollarDelta =
+        parseImpactDollars(right.estimatedImpact) -
+        parseImpactDollars(left.estimatedImpact);
+      if (dollarDelta !== 0) return dollarDelta;
+      return (
         (severityRank[right.severity] || 0) -
         (severityRank[left.severity] || 0)
-    )
+      );
+    })
     .slice(0, limit)
     .map((finding) => ({
       ruleId: finding.ruleId,
@@ -36,7 +51,29 @@ const topRules = (findings, limit = 5) => {
       severity: finding.severity,
       category: finding.category,
       title: finding.title,
+      // v2 enrichment: carry evidence + impact so diffs can reason over them.
+      estimatedImpact: finding.estimatedImpact ?? null,
+      estimatedImpactDollars: parseImpactDollars(finding.estimatedImpact),
+      evidence: finding.evidence ?? null,
     }));
+};
+
+/**
+ * Count entities per level across all platforms in the normalized dataset.
+ * Returns {} when no dataset. Backward-safe: absent → empty.
+ */
+const structuralCounts = (dataset) => {
+  const platforms = dataset?.data?.platforms || {};
+  const counts = {};
+  for (const platformData of Object.values(platforms)) {
+    const byLevel = platformData?.byLevel || {};
+    for (const [level, records] of Object.entries(byLevel)) {
+      if (Array.isArray(records)) {
+        counts[level] = (counts[level] || 0) + records.length;
+      }
+    }
+  }
+  return counts;
 };
 
 const safeNumber = (value) => {
@@ -53,6 +90,7 @@ export const buildAuditMemorySummary = (audit) => {
   const datasetSummary = audit.normalizedDataset?.summary || null;
   const totals = datasetSummary?.totals || {};
   const platformSummaries = datasetSummary?.platforms || {};
+  const bp = audit.businessProfileSnapshot?.sectionA || {};
 
   const severityCounts = SEVERITY_KEYS.reduce((acc, severity) => {
     acc[severity] = 0;
@@ -64,13 +102,37 @@ export const buildAuditMemorySummary = (audit) => {
     }
   }
 
+  // Top-level aggregates + derived KPIs for cross-audit comparison.
+  const spend = safeNumber(totals.spend) ?? 0;
+  const impressions = safeNumber(totals.impressions) ?? 0;
+  const clicks = safeNumber(totals.clicks) ?? 0;
+  const conversions = safeNumber(totals.conversions) ?? 0;
+  const kpis = deriveKpis({ spend, impressions, clicks, conversions });
+  const criticalRuleIds = findings
+    .filter((f) => f.severity === "CRITICAL")
+    .map((f) => f.ruleId);
+
   return {
     auditId: audit.id,
     completedAt: audit.completedAt,
+    adAccountId: audit.adAccountId ?? null,
+    adAccountName: audit.adAccount?.name ?? null,
     selectedPlatforms: audit.selectedPlatforms || [],
     dataSource: audit.dataSource || null,
     healthScore: audit.healthScore ?? null,
     categoryScores: audit.categoryScores ?? null,
+    // Flat aggregates + KPIs (v3) — used by peer/self comparison helpers.
+    spend,
+    impressions,
+    clicks,
+    conversions,
+    kpis,
+    criticalRuleIds,
+    businessType: bp.businessType ?? null,
+    monthlyBudget: bp.monthlyBudget ?? null,
+    targetCpa: bp.targetCpa ?? null,
+    targetRoas: bp.targetRoas ?? null,
+    brandTerms: bp.brandTerms ?? null,
     findingCounts: {
       total: findings.length,
       bySeverity: severityCounts,
@@ -96,7 +158,8 @@ export const buildAuditMemorySummary = (audit) => {
     },
     uploadReadiness:
       audit.uploadReadiness?.mode || audit.uploadReadiness?.status || null,
-    schemaVersion: 1,
+    structuralCounts: structuralCounts(audit.normalizedDataset),
+    schemaVersion: 3,
   };
 };
 
@@ -110,6 +173,7 @@ export const writeAuditMemorySummary = async (auditId) => {
     include: {
       ruleFindings: true,
       normalizedDataset: true,
+      adAccount: true,
     },
   });
 

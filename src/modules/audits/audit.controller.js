@@ -30,6 +30,8 @@ import {
   fetchAuditComparison,
   fetchAuditTrend,
 } from "./auditHistory.service.js";
+import { isDeepAuditEnabled } from "./agent/config.js";
+import { runDeepAuditForAudit } from "./agent/deepAudit.service.js";
 
 const formatPlatformLabel = (platform) =>
   ({
@@ -43,10 +45,51 @@ const buildAdAccountName = (accountName, platform, totalPlatforms) =>
     ? `${accountName} - ${formatPlatformLabel(platform)}`
     : accountName;
 
+/**
+ * Overlay the lightweight new-audit context onto the org's existing business
+ * profile answers. Context fields win when present; everything else is
+ * preserved. Returns null when there is neither existing data nor context,
+ * so the snapshot stays undefined rather than an empty object.
+ */
+const buildSnapshotFromContext = (existingAnswers, context) => {
+  const base = existingAnswers && typeof existingAnswers === "object" ? existingAnswers : {};
+  const ctx = context || {};
+
+  const overlay = {};
+  for (const key of [
+    "businessType",
+    "monthlyBudget",
+    "mainGoal",
+    "targetCpa",
+    "targetRoas",
+    "brandTerms",
+  ]) {
+    if (ctx[key] !== undefined && ctx[key] !== null && ctx[key] !== "") {
+      overlay[key] = ctx[key];
+    }
+  }
+
+  const hasExisting = Object.keys(base).length > 0;
+  const hasOverlay = Object.keys(overlay).length > 0;
+  if (!hasExisting && !hasOverlay) return null;
+
+  return {
+    ...base,
+    sectionA: {
+      ...(base.sectionA || {}),
+      ...overlay,
+    },
+  };
+};
+
 export const createAuditSetup = async (req, res) => {
   const organizationId = getOrganizationId(req);
-  const { accountName, selectedPlatforms, dataSource } = req.body;
+  const { accountName, selectedPlatforms, dataSource, context } = req.body;
   const uniquePlatforms = [...new Set(selectedPlatforms)];
+
+  const existingAnswers =
+    req.user.memberships?.[0]?.organization?.businessProfile?.answers || null;
+  const snapshot = buildSnapshotFromContext(existingAnswers, context);
 
   const result = await prisma.$transaction(async (tx) => {
     const adAccounts = [];
@@ -71,14 +114,23 @@ export const createAuditSetup = async (req, res) => {
         selectedPlatforms: uniquePlatforms,
         dataSource,
         status: "INTAKE_IN_PROGRESS",
-        businessProfileSnapshot:
-          req.user.memberships?.[0]?.organization?.businessProfile?.answers ||
-          undefined,
+        businessProfileSnapshot: snapshot || undefined,
       },
       include: {
         adAccount: true,
       },
     });
+
+    // Persist the context onto the org's business profile so future audits
+    // prefill and hasBusinessProfile flips true (removes onboarding friction).
+    // Best-effort + only when we actually have context to save.
+    if (snapshot) {
+      await tx.businessProfile.upsert({
+        where: { organizationId },
+        create: { organizationId, userId: req.user.id, answers: snapshot },
+        update: { answers: snapshot },
+      });
+    }
 
     await tx.auditEvent.create({
       data: {
@@ -399,6 +451,7 @@ export const uploadManualAuditFile = async (req, res) => {
         records: parsedUpload.records,
         uploadSummary: parsedUpload.summary,
         level: parsedUpload.level,
+        breakdowns: parsedUpload.breakdowns,
       });
 
       normalizedDataset = await tx.normalizedDataset.upsert({
@@ -589,6 +642,26 @@ export const generateAiReport = async (req, res) => {
       pollUrl: `/api/audits/${audit.id}`,
     },
   });
+};
+
+/**
+ * Deep Audit — agentic, tool-using premium audit. Synchronous and flag-gated
+ * (DEEP_AUDIT_ENABLED); 404s when the flag is off so the surface stays
+ * invisible. Plan-feature gating (Agency/Agency+) is deferred — the AI cost cap
+ * still applies via the route middleware.
+ */
+export const runDeepAuditReport = async (req, res) => {
+  if (!isDeepAuditEnabled()) {
+    throw notFound("Deep Audit is not available.");
+  }
+
+  const organizationId = getOrganizationId(req);
+  const result = await runDeepAuditForAudit({
+    auditId: req.params.auditId,
+    organizationId,
+  });
+
+  res.json({ status: "success", data: result });
 };
 
 /**

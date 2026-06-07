@@ -12,15 +12,27 @@
     "db:seed-plans": "node src/scripts/seedSubscriptionPlans.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "rules:diff": "node src/rules/scripts/diff-legacy-vs-registry.js",
+    "rules:perf": "node src/rules/scripts/perf-harness.js",
+    "rules:smoke": "node src/rules/scripts/smoke-registry.js",
+    "rules:samples": "node src/rules/scripts/sample-findings.js",
+    "rules:inventory": "node src/rules/scripts/inventory.js",
+    "ai:eval": "node src/ai/eval/run.js",
+    "deep:eval": "node src/modules/audits/agent/eval/run.js",
+    "deep:smoke": "node src/modules/audits/agent/eval/run.js --only ctr-not-cpm"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.102.0",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
+    "@sentry/node": "^10.56.0",
     "axios": "^1.16.0",
     "bull": "^4.16.5",
     "cors": "^2.8.6",
@@ -35,10 +47,13 @@
     "nodemailer": "^8.0.7",
     "pdfkit": "^0.18.0",
     "pg": "^8.20.0",
+    "pino": "^10.3.1",
+    "stripe": "^22.2.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.14",
-    "prisma": "^7.8.0"
+    "prisma": "^7.8.0",
+    "vitest": "^2.1.8"
   }
 }

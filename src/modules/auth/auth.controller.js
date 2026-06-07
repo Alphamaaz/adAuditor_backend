@@ -507,16 +507,57 @@ const socialLoginRedirect = (res, user) => {
   res.redirect(`${process.env.CLIENT_ORIGIN}${dest}`);
 };
 
+/**
+ * Look up or create a user from a social OAuth provider.
+ *
+ * Account-linking safety: providers that do NOT verify the user's email
+ * server-side (Meta, TikTok) must never auto-link to an existing account
+ * by email collision — that path enables takeover when an attacker creates
+ * a social-provider account using the victim's email.
+ *
+ * For these providers we ONLY auto-link by provider ID (which the provider
+ * controls). On email collision with no provider-ID match, we refuse and
+ * direct the user to log in via their existing method first, then link
+ * the social account from settings.
+ *
+ * Google's flow at googleAuth() separately verifies email_verified=true so
+ * email-collision linking is safe there.
+ */
+const PROVIDER_VERIFIES_EMAIL = {
+  googleId: true,
+  metaId: false,
+  tiktokId: false,
+};
+
 const upsertSocialUser = async (tx, req, { field, id, email, name }) => {
-  let user = await tx.user.findFirst({
-    where: { OR: [{ [field]: id }, { email }] },
-  });
+  // 1) Try provider-ID match first (always safe).
+  let user = await tx.user.findFirst({ where: { [field]: id } });
+
+  // 2) Only fall back to email-collision linking when the provider attests
+  //    the email is verified.
+  if (!user && PROVIDER_VERIFIES_EMAIL[field]) {
+    user = await tx.user.findFirst({ where: { email } });
+  }
 
   if (user?.status === "SUSPENDED") {
     throw forbidden("Your account has been suspended. Please contact support.");
   }
 
   if (!user) {
+    // 3) No provider-ID match AND either (a) no email match OR (b) email
+    //    match exists but provider doesn't verify email. Before creating
+    //    a new account, check whether an account with this email already
+    //    exists — refuse with a clear message rather than silently linking.
+    if (!PROVIDER_VERIFIES_EMAIL[field]) {
+      const emailOwner = await tx.user.findFirst({ where: { email } });
+      if (emailOwner) {
+        throw badRequest(
+          "An account with this email already exists. Log in with your existing " +
+            "method, then connect this social account from your settings page."
+        );
+      }
+    }
+
     user = await tx.user.create({
       data: {
         email,
@@ -539,6 +580,7 @@ const upsertSocialUser = async (tx, req, { field, id, email, name }) => {
       data: { organizationId: organization.id, status: "TRIALING" },
     });
   } else if (!user[field]) {
+    // Found by email match (Google only — providers that verify email).
     user = await tx.user.update({
       where: { id: user.id },
       data: {
@@ -613,9 +655,15 @@ export const metaCallback = async (req, res) => {
     return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=meta_no_email`);
   }
 
-  const result = await prisma.$transaction((tx) =>
-    upsertSocialUser(tx, req, { field: "metaId", id: metaId, email, name })
-  );
+  let result;
+  try {
+    result = await prisma.$transaction((tx) =>
+      upsertSocialUser(tx, req, { field: "metaId", id: metaId, email, name })
+    );
+  } catch (err) {
+    const code = err?.statusCode === 400 ? "email_already_in_use" : "meta_link_failed";
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=${code}`);
+  }
 
   setSessionCookie(res, result.token);
   socialLoginRedirect(res, result.user);
@@ -696,9 +744,15 @@ export const tiktokCallback = async (req, res) => {
     return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=tiktok_no_email`);
   }
 
-  const result = await prisma.$transaction((tx) =>
-    upsertSocialUser(tx, req, { field: "tiktokId", id: tiktokId, email, name })
-  );
+  let result;
+  try {
+    result = await prisma.$transaction((tx) =>
+      upsertSocialUser(tx, req, { field: "tiktokId", id: tiktokId, email, name })
+    );
+  } catch (err) {
+    const code = err?.statusCode === 400 ? "email_already_in_use" : "tiktok_link_failed";
+    return res.redirect(`${process.env.CLIENT_ORIGIN}/login?error=${code}`);
+  }
 
   setSessionCookie(res, result.token);
   socialLoginRedirect(res, result.user);

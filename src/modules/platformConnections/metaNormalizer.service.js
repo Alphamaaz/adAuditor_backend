@@ -39,6 +39,59 @@ const getRoas = (purchaseRoas) => {
   return match ? parseNumber(match.value) : null;
 };
 
+/**
+ * Result action types in priority order, spanning Meta objectives so that
+ * "results" and cost-per-result are computable for non-purchase accounts —
+ * messaging, lead-gen, app installs, subscriptions — not just sales.
+ *
+ * `getActionValue` matches by suffix, so "purchase" also catches omni_purchase
+ * and offsite_conversion.fb_pixel_purchase, "app_install" catches
+ * mobile_app_install, etc.
+ *
+ * Order = which result a mixed actions array reports as the primary one. A
+ * messaging or app campaign carries none of the higher-priority types, so it
+ * falls through to its own; a sales campaign still reports purchases first.
+ * Mid-funnel actions (checkout, add-to-cart) rank last so they only surface
+ * when no real conversion exists.
+ */
+const RESULT_ACTION_PRIORITY = [
+  "purchase",
+  "lead",
+  "lead_grouped",
+  "complete_registration",
+  "subscribe",
+  "start_trial",
+  "messaging_conversation_started_7d",
+  "total_messaging_connection",
+  "app_install",
+  "initiate_checkout",
+  "initiated_checkout",
+  "add_to_cart",
+];
+
+/**
+ * The primary result count from an actions array, picking the highest-priority
+ * objective present (value > 0). Returns null when none are found.
+ */
+const getPrimaryResult = (actions) => {
+  for (const type of RESULT_ACTION_PRIORITY) {
+    const value = getActionValue(actions, type);
+    if (value != null && value > 0) return value;
+  }
+  return null;
+};
+
+/**
+ * Cost per the primary result, matching the same objective priority order.
+ */
+const getPrimaryResultCpa = (costPerActionType) => {
+  for (const type of RESULT_ACTION_PRIORITY) {
+    const value = getCostPerAction(costPerActionType, type);
+    if (value != null && value > 0) return value;
+  }
+  return null;
+};
+
 // ── Campaign-level ──────────────────────────────────────────────────────────
 
 export const normalizeCampaignInsights = (insights) =>
@@ -56,15 +109,8 @@ export const normalizeCampaignInsights = (insights) =>
     cpc: parseNumber(row.cpc),
     ctr: parseNumber(row.ctr),
     frequency: parseNumber(row.frequency),
-    results:
-      getActionValue(row.actions, "purchase") ||
-      getActionValue(row.actions, "lead") ||
-      getActionValue(row.actions, "complete_registration") ||
-      null,
-    cpa:
-      getCostPerAction(row.cost_per_action_type, "purchase") ||
-      getCostPerAction(row.cost_per_action_type, "lead") ||
-      null,
+    results: getPrimaryResult(row.actions),
+    cpa: getPrimaryResultCpa(row.cost_per_action_type),
     roas: getRoas(row.purchase_roas),
     dateStart: row.date_start,
     dateEnd: row.date_stop,
@@ -109,14 +155,8 @@ export const normalizeAdSetInsights = (insights) =>
     frequency: parseNumber(row.frequency),
     clicks: parseNumber(row.clicks),
     ctr: parseNumber(row.ctr),
-    results:
-      getActionValue(row.actions, "purchase") ||
-      getActionValue(row.actions, "lead") ||
-      null,
-    cpa:
-      getCostPerAction(row.cost_per_action_type, "purchase") ||
-      getCostPerAction(row.cost_per_action_type, "lead") ||
-      null,
+    results: getPrimaryResult(row.actions),
+    cpa: getPrimaryResultCpa(row.cost_per_action_type),
     roas: getRoas(row.purchase_roas),
     dateStart: row.date_start,
     dateEnd: row.date_stop,
@@ -155,14 +195,8 @@ export const normalizeAdInsights = (insights) =>
     frequency: parseNumber(row.frequency),
     clicks: parseNumber(row.clicks),
     ctr: parseNumber(row.ctr),
-    results:
-      getActionValue(row.actions, "purchase") ||
-      getActionValue(row.actions, "lead") ||
-      null,
-    cpa:
-      getCostPerAction(row.cost_per_action_type, "purchase") ||
-      getCostPerAction(row.cost_per_action_type, "lead") ||
-      null,
+    results: getPrimaryResult(row.actions),
+    cpa: getPrimaryResultCpa(row.cost_per_action_type),
     qualityRanking: row.quality_ranking || null,
     engagementRanking: row.engagement_rate_ranking || null,
     conversionRanking: row.conversion_rate_ranking || null,
@@ -186,6 +220,41 @@ export const enrichAdsWithStructure = (insightRecords, structureRecords) => {
   });
 };
 
+// ── Breakdown + daily normalizers ─────────────────────────────────────────────
+
+/**
+ * Normalize one breakdown dimension's insight rows into segment records.
+ * @param {Array} insights raw Meta rows
+ * @param {string} dimension our canonical dimension key (age/gender/...)
+ * @param {string} segmentField the Meta response field carrying the value
+ */
+export const normalizeBreakdownInsights = (insights, dimension, segmentField) =>
+  (insights || []).map((row) => ({
+    dimension,
+    segment: row[segmentField] != null ? String(row[segmentField]) : "unknown",
+    spend: parseNumber(row.spend),
+    impressions: parseNumber(row.impressions),
+    clicks: parseNumber(row.clicks),
+    reach: parseNumber(row.reach),
+    results: getPrimaryResult(row.actions) || 0,
+    conversions: getPrimaryResult(row.actions) || 0,
+    cpa: getPrimaryResultCpa(row.cost_per_action_type),
+  }));
+
+/**
+ * Normalize daily time-series rows (time_increment=1).
+ */
+export const normalizeDailyInsights = (insights) =>
+  (insights || []).map((row) => ({
+    date: row.date_start,
+    spend: parseNumber(row.spend),
+    impressions: parseNumber(row.impressions),
+    clicks: parseNumber(row.clicks),
+    reach: parseNumber(row.reach),
+    results: getPrimaryResult(row.actions) || 0,
+    conversions: getPrimaryResult(row.actions) || 0,
+  }));
+
 // ── Dataset assembly ─────────────────────────────────────────────────────────
 
 const sumField = (records, field) =>
@@ -200,6 +269,8 @@ export const buildMetaNormalizedDataset = ({
   adSetRecords,
   adRecords,
   currency,
+  byDimension = {},
+  byDay = [],
 }) => {
   const allRecords = [...campaignRecords, ...adSetRecords, ...adRecords];
 
@@ -228,6 +299,8 @@ export const buildMetaNormalizedDataset = ({
           files: [],
           records: allRecords,
           byLevel,
+          byDimension: byDimension || {},
+          byDay: Array.isArray(byDay) ? byDay : [],
           currency: currency || null,
           source: "OAUTH",
         },

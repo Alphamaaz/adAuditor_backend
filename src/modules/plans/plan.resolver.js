@@ -157,6 +157,12 @@ export const recordAuditRun = async (organizationId, subscription) => {
 export const FREE_PLAN_FALLBACK = {
   monthlyAuditLimit: 1,
   platformLimit: 1,
+  // Cost ceiling for the free tier. AI is gated off by aiNarrative=false
+  // below, but the cap is still in place as belt-and-suspenders.
+  aiMonthlyUsdCap: 0.5,
+  // Per-org storage ceiling in MB. Free tier: 100 MB. Hard-codes a sane
+  // limit until paid plans declare their own.
+  storageMbCap: 100,
   features: {
     pdfExport: true,
     manualUpload: true,

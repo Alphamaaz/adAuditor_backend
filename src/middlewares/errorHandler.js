@@ -1,4 +1,5 @@
 import { AppError } from "../utils/appError.js";
+import { Sentry } from "../lib/sentry.js";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -59,6 +60,16 @@ export const globalErrorHandler = (err, req, res, next) => {
 
   if (!normalizedError.isOperational || statusCode >= 500) {
     console.error(normalizedError);
+    // Report 5xx + unknown errors to Sentry. 4xx (operational) skipped.
+    if (process.env.SENTRY_DSN) {
+      Sentry.withScope((scope) => {
+        scope.setTag("status_code", String(statusCode));
+        scope.setExtra("path", req.originalUrl);
+        scope.setExtra("method", req.method);
+        if (req.user?.id) scope.setUser({ id: req.user.id, email: req.user.email });
+        Sentry.captureException(err);
+      });
+    }
   }
 
   const response = {

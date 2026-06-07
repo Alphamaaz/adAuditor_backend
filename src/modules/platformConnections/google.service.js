@@ -355,6 +355,28 @@ export const fetchSearchTerms = async (accessToken, customerId, loginCustomerId 
 };
 
 /**
+ * Fetch daily time series at the account level (segments.date).
+ * Powers byDay trend analysis. Best-effort — caller tolerates failure.
+ */
+export const fetchDailySegments = async (accessToken, customerId, dateRange = "LAST_30_DAYS", loginCustomerId = null) => {
+  const query = `
+    SELECT
+      segments.date,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM customer
+    WHERE ${dateFilter(dateRange)}
+    ORDER BY segments.date
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} daily segment row(s).`);
+  return results;
+};
+
+/**
  * Fetch negative keyword shared lists.
  * member_count and reference_count give the rule engine coverage signals for KW-002.
  */

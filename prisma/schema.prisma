@@ -77,6 +77,13 @@ enum Severity {
   LOW
 }
 
+enum RuleExecutionStatus {
+  FIRED
+  PASSED
+  SKIPPED
+  ERROR
+}
+
 model User {
   id                       String                 @id @default(uuid())
   email                    String                 @unique
@@ -198,6 +205,8 @@ model SubscriptionPlan {
   monthlyAuditLimit   Int?
   platformLimit       Int?
   historyDays         Int?
+  aiMonthlyUsdCap     Decimal?       @db.Decimal(10, 2)
+  storageMbCap        Int?
   features            Json?
   stripePriceId       String?
   isActive            Boolean        @default(true)
@@ -318,7 +327,9 @@ model Audit {
   uploadedFiles              UploadedFile[]
   normalizedDataset          NormalizedDataset?
   ruleFindings               RuleFinding[]
+  ruleExecutions             RuleExecution[]
   aiReport                   AiReport?
+  deepAuditReport            DeepAuditReport?
   memorySummary              AuditMemorySummary?
   recommendationFeedback     RecommendationFeedback[]
   pdfReports                 PdfReport[]
@@ -391,6 +402,47 @@ model RuleFinding {
   @@index([ruleId])
 }
 
+model RuleExecution {
+  id              String              @id @default(uuid())
+  auditId         String
+  ruleId          String
+  ruleVersion     String
+  status          RuleExecutionStatus
+  durationMs      Int
+  findingId       String?
+  errorMessage    String?
+  evidenceSummary Json?
+  contextVersion  String
+  planTier        String
+  createdAt       DateTime            @default(now())
+
+  audit           Audit               @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@index([auditId])
+  @@index([ruleId, status, createdAt])
+  @@index([ruleId, createdAt])
+}
+
+model AiUsage {
+  id             String   @id @default(uuid())
+  organizationId String?
+  auditId        String?
+  provider       String
+  model          String
+  purpose        String?
+  inputTokens    Int      @default(0)
+  outputTokens   Int      @default(0)
+  totalTokens    Int      @default(0)
+  costUsd        Decimal  @db.Decimal(10, 6)
+  status         String   @default("SUCCESS")
+  errorMessage   String?
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([auditId])
+  @@index([provider, model, createdAt])
+}
+
 model AiReport {
   id        String   @id @default(uuid())
   auditId   String   @unique
@@ -402,6 +454,21 @@ model AiReport {
   updatedAt DateTime @updatedAt
 
   audit     Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+}
+
+model DeepAuditReport {
+  id             String   @id @default(uuid())
+  auditId        String   @unique
+  provider       String
+  model          String
+  mode           String
+  report         Json
+  reasoningTrace Json
+  usage          Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  audit          Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
 }
 
 model AuditMemorySummary {

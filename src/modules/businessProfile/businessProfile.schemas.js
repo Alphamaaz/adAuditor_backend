@@ -20,6 +20,15 @@ const sectionASchema = z.object({
     .array(z.enum(["Sales", "Leads", "Traffic", "Awareness", "App Installs"]))
     .optional()
     .default([]),
+  // Added for the lightweight new-audit context flow. Kept here so the
+  // edit-profile path and the audit snapshot share one shape.
+  mainGoal: z
+    .enum(["leads", "sales", "roas", "cpa_reduction", "traffic", "awareness"])
+    .nullable()
+    .optional(),
+  // Brand terms / company name — comma or space separated. Powers the
+  // Google brand-separation and cross-platform cannibalization rules.
+  brandTerms: z.string().max(300).nullable().optional(),
 });
 
 const sectionBSchema = z.object({

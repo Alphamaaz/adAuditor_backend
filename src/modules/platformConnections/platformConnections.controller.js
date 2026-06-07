@@ -14,6 +14,9 @@ import {
   fetchCampaigns,
   fetchAdSets,
   fetchAds,
+  fetchBreakdownInsights,
+  fetchDailyInsights,
+  META_BREAKDOWNS,
 } from "./meta.service.js";
 import {
   normalizeCampaignInsights,
@@ -23,6 +26,8 @@ import {
   enrichAdSetsWithStructure,
   enrichAdsWithStructure,
   buildMetaNormalizedDataset,
+  normalizeBreakdownInsights,
+  normalizeDailyInsights,
 } from "./metaNormalizer.service.js";
 import {
   exchangeCodeForToken as exchangeTikTokCode,
@@ -48,6 +53,7 @@ import {
   fetchAdsWithMetrics,
   fetchKeywordsWithMetrics,
   fetchSearchTerms,
+  fetchDailySegments,
   fetchNegativeKeywordLists,
   fetchPMaxAssets,
   fetchShoppingProducts,
@@ -63,6 +69,7 @@ import {
   normalizePMaxAssets,
   normalizeShoppingProducts,
   normalizeAudienceBidding,
+  normalizeGoogleDailySegments,
   buildGoogleNormalizedDataset,
 } from "./googleNormalizer.service.js";
 
@@ -588,12 +595,45 @@ export const fetchMetaDataForAudit = async (req, res) => {
   );
   const campaigns90d = normalizeCampaignInsights(campaignInsights90d);
 
+  // Fetch dimension breakdowns + daily series — BEST-EFFORT. Some accounts or
+  // dimensions return errors (permissions, no data); none of that may fail the
+  // audit, so we use allSettled and silently drop failures.
+  const breakdownKeys = Object.keys(META_BREAKDOWNS);
+  const [breakdownResults, dailyResult] = await Promise.all([
+    Promise.allSettled(
+      breakdownKeys.map((key) =>
+        fetchBreakdownInsights(accessToken, adAccountId, key, "last_30d")
+      )
+    ),
+    Promise.allSettled([
+      fetchDailyInsights(accessToken, adAccountId, "last_30d"),
+    ]),
+  ]);
+
+  const byDimension = {};
+  breakdownResults.forEach((res, index) => {
+    if (res.status !== "fulfilled" || !Array.isArray(res.value) || res.value.length === 0) {
+      return;
+    }
+    const key = breakdownKeys[index];
+    const segmentField = META_BREAKDOWNS[key].field;
+    const rows = normalizeBreakdownInsights(res.value, key, segmentField);
+    if (rows.length > 0) byDimension[key] = rows;
+  });
+
+  const byDay =
+    dailyResult[0]?.status === "fulfilled"
+      ? normalizeDailyInsights(dailyResult[0].value)
+      : [];
+
   // Build the normalized dataset in the schema the rule engine expects
   const normalizedDataset = buildMetaNormalizedDataset({
     campaignRecords: campaigns,
     adSetRecords: adSets,
     adRecords: ads,
     currency: null, // fetched per-account below if needed
+    byDimension,
+    byDay,
   });
 
   // Also include 90-day data in a byLevel bucket for historical rules
@@ -994,6 +1034,15 @@ export const fetchGoogleDataForAudit = async (req, res) => {
     `${shoppingProducts.length} shopping products, ${audienceBidding.length} audience criteria`
   );
 
+  // Daily time series — BEST-EFFORT. Never fail the audit on a daily-fetch error.
+  let googleByDay = [];
+  try {
+    const dailyRows = await fetchDailySegments(accessToken, customerId, "LAST_30_DAYS");
+    googleByDay = normalizeGoogleDailySegments(dailyRows);
+  } catch (dailyErr) {
+    console.warn(`[Google Ads] daily segment fetch failed (non-fatal): ${dailyErr.message}`);
+  }
+
   const googleDataset = buildGoogleNormalizedDataset({
     campaignRecords: campaigns,
     adGroupRecords: adGroups,
@@ -1005,6 +1054,7 @@ export const fetchGoogleDataForAudit = async (req, res) => {
     shoppingProductRecords: shoppingProducts,
     audienceBiddingRecords: audienceBidding,
     currency,
+    byDay: googleByDay,
   });
 
   // Include 90-day campaign data for historical rules

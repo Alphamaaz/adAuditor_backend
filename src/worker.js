@@ -1,6 +1,18 @@
 import "dotenv/config";
+import { initSentry, Sentry } from "./lib/sentry.js";
+initSentry();
 import { initializeAuditQueueProcessors } from "./queues/auditQueue.js";
 import { closeAllQueues, getDriver } from "./queues/jobQueue.js";
+
+// Capture unhandled rejections + uncaught exceptions in the worker.
+process.on("unhandledRejection", (err) => {
+  console.error("[worker] unhandledRejection", err);
+  if (process.env.SENTRY_DSN) Sentry.captureException(err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[worker] uncaughtException", err);
+  if (process.env.SENTRY_DSN) Sentry.captureException(err);
+});
 
 /**
  * Worker entry point. Run as a separate process from the API:

@@ -1,3 +1,5 @@
+import { buildEvidencePacket } from "./evidencePacket.service.js";
+
 const MAX_FINDINGS = 20;
 const MAX_PRIOR_AUDITS = 3;
 
@@ -58,6 +60,9 @@ export const buildAiAuditContext = (audit, { priorAudits = [] } = {}) => {
     ruleFindings: sortedFindings.slice(0, MAX_FINDINGS).map(compactFinding),
     deterministicReport: audit.aiReport?.output || null,
     priorAudits: trimmedPriorAudits,
+    // Curated, verified-facts-only packet. The narrative model should reason
+    // over this; the surrounding fields remain for backward compatibility.
+    evidencePacket: buildEvidencePacket(audit, { priorAudits: trimmedPriorAudits }),
     contextLimits: {
       maxFindingsSent: MAX_FINDINGS,
       maxPriorAudits: MAX_PRIOR_AUDITS,

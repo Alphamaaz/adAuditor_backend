@@ -15,4 +15,5 @@ RUN npx prisma generate
 
 EXPOSE 5000
 
-CMD ["node", "src/server.js"]
+# Push schema changes to the DB before starting (safe for additive changes like new columns).
+CMD ["sh", "-c", "npx prisma db push && node src/server.js"]

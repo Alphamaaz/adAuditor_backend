@@ -1,3 +1,14 @@
+import {
+  analyzeDimension,
+  baselineCpa,
+} from "../../lib/segments/contributionAnalysis.js";
+import {
+  gateFinding,
+  zeroConversionConfident,
+  wilsonInterval,
+} from "../../lib/stats/significance.js";
+import { diagnoseCpaDriver } from "../../lib/kpi/decomposition.js";
+
 const SEVERITY_PENALTIES = {
   CRITICAL: 25,
   HIGH: 15,
@@ -47,7 +58,7 @@ const PLATFORM_LABELS = {
   TIKTOK: "TikTok",
 };
 
-const INDUSTRY_BENCHMARKS = {
+export const INDUSTRY_BENCHMARKS = {
   ctr: {
     META: {
       eCommerce:     { good: 1.5, warning: 0.8, danger: 0.4 },
@@ -94,7 +105,7 @@ const INDUSTRY_BENCHMARKS = {
   },
 };
 
-const getBenchmark = (metric, platform, businessType) =>
+export const getBenchmark = (metric, platform, businessType) =>
   INDUSTRY_BENCHMARKS[metric]?.[platform]?.[businessType] ||
   INDUSTRY_BENCHMARKS[metric]?.[platform]?.Other ||
   null;
@@ -556,6 +567,13 @@ const addMetaFindings = ({ audit, dataset, findings }) => {
             examples: zeroResult
               .slice(0, 3)
               .map((r) => ({ name: r.name, spend: Math.round(numberValue(r.spend)) })),
+            ...(() => {
+              const z = zeroConversionConfident({
+                spend: zeroResultSpend,
+                clicks: sumClicks(zeroResult),
+              });
+              return { confidence: z.confidence, sampleNote: z.sampleNote };
+            })(),
           },
           estimatedImpact: `$${Math.round(zeroResultSpend).toLocaleString()} in spend produced zero recorded results. Pausing or restructuring these campaigns directly recovers this budget.`,
           fixSteps: [
@@ -1023,6 +1041,13 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
             examples: zeroConvCampaigns
               .slice(0, 3)
               .map((r) => ({ name: r.name, spend: Math.round(numberValue(r.spend)) })),
+            ...(() => {
+              const z = zeroConversionConfident({
+                spend: zeroConvSpend,
+                clicks: sumClicks(zeroConvCampaigns),
+              });
+              return { confidence: z.confidence, sampleNote: z.sampleNote };
+            })(),
           },
           estimatedImpact: `$${Math.round(zeroConvSpend).toLocaleString()} produced zero conversions. This is either a tracking problem or a structural inefficiency that compounds with every day of continued spend.`,
           fixSteps: [
@@ -1847,6 +1872,19 @@ const addBenchmarkFindings = ({ audit, dataset, findings }) => {
     const ctrBenchmark = getBenchmark("ctr", platform, businessType);
     if (ctrBenchmark && summary.impressions > 5000) {
       const actualCtr = (summary.clicks / summary.impressions) * 100;
+      // Significance: the CTR estimate is reliable above the impression gate.
+      const ctrCi = wilsonInterval(summary.clicks, summary.impressions);
+      const ctrSignificance = {
+        minSamplePassed: summary.impressions >= 1000,
+        confidence: summary.impressions >= 5000 ? "high" : "medium",
+        sampleNote: `CTR measured over ${summary.impressions.toLocaleString()} impressions`,
+        ctrConfidenceInterval: ctrCi
+          ? {
+              lowPct: +(ctrCi.low * 100).toFixed(3),
+              highPct: +(ctrCi.high * 100).toFixed(3),
+            }
+          : null,
+      };
       if (actualCtr < ctrBenchmark.danger) {
         findings.push(
           createFinding({
@@ -1862,6 +1900,7 @@ const addBenchmarkFindings = ({ audit, dataset, findings }) => {
               benchmarkDanger: ctrBenchmark.danger,
               businessType,
               impressions: summary.impressions,
+              ...ctrSignificance,
             },
             estimatedImpact: `Closing the gap from ${actualCtr.toFixed(2)}% to the ${ctrBenchmark.good}% benchmark would deliver significantly more clicks at the same CPM — equivalent to free traffic on your current spend of $${Math.round(summary.spend).toLocaleString()}.`,
             fixSteps: [
@@ -1888,6 +1927,8 @@ const addBenchmarkFindings = ({ audit, dataset, findings }) => {
               benchmarkGood: ctrBenchmark.good,
               benchmarkWarning: ctrBenchmark.warning,
               businessType,
+              impressions: summary.impressions,
+              ...ctrSignificance,
             },
             estimatedImpact: `Reaching the ${ctrBenchmark.good}% benchmark CTR would reduce your effective CPC without increasing spend.`,
             fixSteps: [
@@ -1953,6 +1994,80 @@ const addBenchmarkFindings = ({ audit, dataset, findings }) => {
               "Use the Audience Overlap tool to consolidate competing ad sets.",
               "Test traffic or reach objectives which typically access cheaper inventory than conversion objectives.",
             ],
+          })
+        );
+      }
+    }
+
+    // ── DIAG-CPA-001: why is CPA over target? (decomposition) ──────────────
+    // Only fires when the customer declared a target CPA and the account has a
+    // material, statistically-meaningful sample. Attributes the overage to
+    // click cost (low CTR) vs post-click conversion (healthy CTR).
+    const targetCpa = numberValue(bp?.sectionA?.targetCpa);
+    const conversions = numberValue(summary.conversions);
+    if (targetCpa > 0 && conversions > 0) {
+      const actualCpa = +(summary.spend / conversions).toFixed(2);
+      const actualCtr =
+        summary.impressions > 0
+          ? +((summary.clicks / summary.impressions) * 100).toFixed(2)
+          : null;
+      const gate = gateFinding({
+        spend: summary.spend,
+        clicks: summary.clicks,
+        conversions,
+        minSpend: 200,
+        minClicks: 100,
+        minConversions: 10,
+        materialSpend: 1000,
+      });
+      const diagnosis = diagnoseCpaDriver({
+        actualCpa,
+        targetCpa,
+        actualCtr,
+        benchmarkCtrWarning: ctrBenchmark?.warning ?? null,
+        benchmarkCtrGood: ctrBenchmark?.good ?? null,
+      });
+
+      if (gate.surface && diagnosis && diagnosis.dominantDriver !== "unknown") {
+        const driverLabel =
+          diagnosis.dominantDriver === "conversion_rate"
+            ? "weak post-click conversion, not expensive clicks"
+            : "expensive, low-relevance clicks";
+        findings.push(
+          createFinding({
+            ruleId: "DIAG-CPA-001",
+            platform,
+            severity: gate.confidence === "high" ? "HIGH" : "MEDIUM",
+            category: getBiddingCategory(platform),
+            title: `${PLATFORM_LABELS[platform]} CPA is over target — driven by ${driverLabel}`,
+            detail: diagnosis.explanationFacts.join(" "),
+            evidence: {
+              metric: diagnosis.metric,
+              actualCpa,
+              targetCpa,
+              dominantDriver: diagnosis.dominantDriver,
+              driverDeltas: diagnosis.driverDeltas,
+              explanationFacts: diagnosis.explanationFacts,
+              confidence: gate.confidence,
+              minSamplePassed: gate.passed,
+              sampleNote: gate.sampleNote,
+            },
+            estimatedImpact:
+              diagnosis.dominantDriver === "conversion_rate"
+                ? `CPA is ${diagnosis.driverDeltas.cpaOverTargetPct}% over your $${targetCpa} target. Because CTR is healthy, the highest-leverage fix is post-click: landing page, offer, and conversion tracking — not bids or creative.`
+                : `CPA is ${diagnosis.driverDeltas.cpaOverTargetPct}% over your $${targetCpa} target, and low CTR means you are buying expensive, low-relevance clicks. Fix creative/targeting relevance before touching bids.`,
+            fixSteps:
+              diagnosis.dominantDriver === "conversion_rate"
+                ? [
+                    "Audit the landing page: load speed, message match, and friction in the conversion step.",
+                    "Verify conversion tracking is firing correctly — under-counting inflates CPA.",
+                    "Test offer / CTA changes before increasing bids.",
+                  ]
+                : [
+                    "Refresh creative and tighten targeting to lift CTR toward benchmark.",
+                    "Pause the lowest-CTR ads carrying meaningful spend.",
+                    "Re-check CPA after CTR improves — click cost should fall.",
+                  ],
           })
         );
       }
@@ -2211,6 +2326,101 @@ const addCompoundFindings = ({ audit, findings }) => {
   }
 };
 
+const SEGMENT_CATEGORY = {
+  META: "Audience Strategy",
+  GOOGLE: "Audience & Attribution",
+  TIKTOK: "Audience Strategy",
+};
+
+const SEGMENT_WASTE_MIN = 50; // floor before we surface a segment finding
+
+/**
+ * SEG-WASTE-001 — dimension-level waste detection.
+ *
+ * Reads `dataset.data.platforms.<PLATFORM>.byDimension` (age/gender/placement/
+ * device/hour/region) when present, computes per-segment CPA vs the platform
+ * baseline, and surfaces the single worst significant segment per platform.
+ *
+ * Safe by construction: when no breakdown data exists (CSV-only audits, or
+ * accounts where Meta returned no breakdowns), it emits nothing.
+ */
+const addSegmentFindings = ({ audit, dataset, findings }) => {
+  for (const platform of audit.selectedPlatforms) {
+    const platformData = dataset?.data?.platforms?.[platform];
+    const byDimension = platformData?.byDimension;
+    if (!byDimension || Object.keys(byDimension).length === 0) continue;
+
+    const summary = getPlatformSummary(dataset, platform);
+    const baseCpa = baselineCpa({
+      spend: summary.spend,
+      conversions: summary.conversions,
+    });
+
+    // Find the worst significant segment across all available dimensions.
+    let worst = null;
+    for (const [dimension, records] of Object.entries(byDimension)) {
+      if (!Array.isArray(records) || records.length === 0) continue;
+      const analysis = analyzeDimension({
+        dimension,
+        records,
+        baselineCpa: baseCpa,
+        minSpend: SEGMENT_WASTE_MIN,
+      });
+      const candidate = analysis.worst;
+      if (
+        candidate &&
+        candidate.wastedSpend >= SEGMENT_WASTE_MIN &&
+        (!worst || candidate.wastedSpend > worst.wastedSpend)
+      ) {
+        worst = candidate;
+      }
+    }
+
+    if (!worst) continue;
+
+    const platformSpend = summary.spend || 0;
+    const wasteShare = platformSpend > 0 ? worst.wastedSpend / platformSpend : 0;
+    const severity =
+      wasteShare >= 0.3 ? "CRITICAL" : wasteShare >= 0.1 ? "HIGH" : "MEDIUM";
+
+    const wasteStr = `$${Math.round(worst.wastedSpend).toLocaleString()}`;
+    const cpaStr = worst.cpa != null ? `$${worst.cpa}` : "no conversions";
+    const baseStr = baseCpa != null ? `$${baseCpa}` : "n/a";
+
+    findings.push(
+      createFinding({
+        ruleId: "SEG-WASTE-001",
+        platform,
+        severity,
+        category: SEGMENT_CATEGORY[platform] || "Audience Strategy",
+        title: `The ${worst.segment} ${worst.dimension} segment is wasting ${wasteStr}`,
+        detail:
+          worst.reason === "zero_conversions"
+            ? `The ${worst.segment} ${worst.dimension} segment spent ${wasteStr} with zero conversions vs a platform baseline CPA of ${baseStr}.`
+            : `The ${worst.segment} ${worst.dimension} segment runs at ${cpaStr} CPA vs a ${baseStr} platform baseline — ${wasteStr} of that spend is excess cost above baseline efficiency.`,
+        evidence: {
+          dimension: worst.dimension,
+          segment: worst.segment,
+          spend: Math.round(worst.spend),
+          conversions: worst.conversions,
+          segmentCpa: worst.cpa,
+          baselineCpa: baseCpa,
+          estimatedWaste: Math.round(worst.wastedSpend),
+          wasteSharePercent: Number((wasteShare * 100).toFixed(1)),
+          reason: worst.reason,
+          sampleNote: worst.sampleNote,
+        },
+        estimatedImpact: `${wasteStr} in this segment is recoverable by reducing or excluding it. Reallocate to segments performing at or below the ${baseStr} baseline CPA.`,
+        fixSteps: [
+          `Review the ${worst.segment} ${worst.dimension} segment in the platform UI to confirm the underperformance.`,
+          `Exclude or down-bid the ${worst.segment} segment if the trend holds over a 7-day window.`,
+          "Reallocate the recovered budget to segments at or below baseline CPA.",
+        ],
+      })
+    );
+  }
+};
+
 const calculateScores = ({ audit, findings }) => {
   const platforms = {};
 
@@ -2326,6 +2536,7 @@ export const runDeterministicAudit = (audit) => {
   addBusinessProfileFindings({ audit, dataset, findings });
   addBenchmarkFindings({ audit, dataset, findings });
   addOpportunityFindings({ audit, dataset, findings });
+  addSegmentFindings({ audit, dataset, findings });
   addCompoundFindings({ audit, findings });
 
   const scores = calculateScores({ audit, findings });

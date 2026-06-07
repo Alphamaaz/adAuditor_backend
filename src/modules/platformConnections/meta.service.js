@@ -165,6 +165,81 @@ export const fetchAdInsights = async (accessToken, adAccountId, datePreset = "la
   return data.data || [];
 };
 
+// Insight fields shared by breakdown + daily calls.
+const BREAKDOWN_FIELDS = [
+  "spend",
+  "impressions",
+  "clicks",
+  "reach",
+  "actions",
+  "cost_per_action_type",
+  "date_start",
+  "date_stop",
+].join(",");
+
+// Supported breakdowns → the Meta `breakdowns` param + the response field
+// that carries the segment value. Each runs as its own account-level call
+// because Meta does not allow arbitrary breakdown combinations.
+export const META_BREAKDOWNS = {
+  age: { param: "age", field: "age" },
+  gender: { param: "gender", field: "gender" },
+  placement: { param: "publisher_platform", field: "publisher_platform" },
+  device: { param: "device_platform", field: "device_platform" },
+  hour: {
+    param: "hourly_stats_aggregated_by_advertiser_time_zone",
+    field: "hourly_stats_aggregated_by_advertiser_time_zone",
+  },
+  region: { param: "region", field: "region" },
+};
+
+/**
+ * Fetch account-level insights segmented by a single breakdown dimension.
+ * Returns raw rows; each row carries the breakdown field + metrics.
+ * Best-effort: caller should tolerate rejection (not all accounts/dimensions
+ * are available).
+ */
+export const fetchBreakdownInsights = async (
+  accessToken,
+  adAccountId,
+  breakdownKey,
+  datePreset = "last_30d"
+) => {
+  const cfg = META_BREAKDOWNS[breakdownKey];
+  if (!cfg) return [];
+  const { data } = await axios.get(`${GRAPH_BASE}/${adAccountId}/insights`, {
+    params: {
+      access_token: accessToken,
+      level: "account",
+      date_preset: datePreset,
+      breakdowns: cfg.param,
+      fields: BREAKDOWN_FIELDS,
+      limit: 500,
+    },
+  });
+  return data.data || [];
+};
+
+/**
+ * Fetch account-level daily time series (time_increment=1).
+ */
+export const fetchDailyInsights = async (
+  accessToken,
+  adAccountId,
+  datePreset = "last_30d"
+) => {
+  const { data } = await axios.get(`${GRAPH_BASE}/${adAccountId}/insights`, {
+    params: {
+      access_token: accessToken,
+      level: "account",
+      date_preset: datePreset,
+      time_increment: 1,
+      fields: BREAKDOWN_FIELDS,
+      limit: 500,
+    },
+  });
+  return data.data || [];
+};
+
 /**
  * Fetch all campaigns in an account (for structure audit — status, budget etc.)
  */

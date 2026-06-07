@@ -2,7 +2,7 @@ services:
   # 1. Frontend (Next.js) - Mapping to 3050
   frontend:
     build:
-      context: ../adAuditor_frontend
+      context: ../ad-auditor-frontend
       dockerfile: Dockerfile
       args:
         - NEXT_PUBLIC_API_URL=https://api.adadviser.uk
@@ -32,6 +32,14 @@ services:
       - JWT_SECRET=change_me_to_a_long_random_string
       - APP_URL=https://adadviser.uk
       - API_URL=https://api.adadviser.uk
+      # Storage: mount a named volume so generated PDFs + uploads survive
+      # container restarts (otherwise they vanish on every redeploy).
+      - STORAGE_ROOT=/data/storage
+      - STORAGE_PERSISTENT=true
+      - PDF_STORAGE_DIR=/data/storage/pdf-reports
+      - UPLOAD_DIR=/data/storage/uploads
+    volumes:
+      - backend_storage:/data/storage
     depends_on:
       - db
       - redis
@@ -64,3 +72,4 @@ networks:
 
 volumes:
   postgres_data:
+  backend_storage:

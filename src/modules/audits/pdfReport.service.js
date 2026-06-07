@@ -179,6 +179,27 @@ const writeAiSections = (doc, audit) => {
       (recommendation.nextSteps || []).forEach((step) => bullet(doc, step));
     });
   }
+
+  // ── v2 evidence-packet sections (render only when present) ────────────────
+  if (output.segmentInsights?.length) {
+    sectionTitle(doc, "Segment Insights");
+    output.segmentInsights.forEach((item) => bullet(doc, item));
+  }
+
+  if (output.comparisonInsights?.length) {
+    sectionTitle(doc, "Peer Comparison");
+    output.comparisonInsights.forEach((item) => bullet(doc, item));
+  }
+
+  if (output.memoryInsights?.length) {
+    sectionTitle(doc, "Change Since Last Audit");
+    output.memoryInsights.forEach((item) => bullet(doc, item));
+  }
+
+  if (output.risksAndAssumptions?.length) {
+    sectionTitle(doc, "Risks & Assumptions");
+    output.risksAndAssumptions.forEach((item) => bullet(doc, item));
+  }
 };
 
 const writeFindings = (doc, audit) => {
