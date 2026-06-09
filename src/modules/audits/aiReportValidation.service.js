@@ -87,7 +87,8 @@ export const validateAiReportOutput = ({ output, findings }) => {
 // intact. Percentages and multipliers ("3×") are intentionally NOT checked —
 // the prompt legitimately asks the model to express goal ratios.
 
-const DOLLAR_RX = /\$\s?([\d,]+(?:\.\d+)?)/g;
+const MONEY_RX =
+  /(?:\$|USD|PKR|EUR|GBP|CAD|AUD|AED|INR|SAR|QAR|KWD|SGD|MYR|THB|PHP|IDR|BDT|LKR|NPR|ZAR)\s?([\d,]+(?:\.\d+)?)/g;
 
 const collectStrings = (value, sink) => {
   if (value == null) return;
@@ -119,8 +120,8 @@ export const validateAiReportFactuality = ({
   const fabricated = new Set();
   for (const str of strings) {
     let m;
-    DOLLAR_RX.lastIndex = 0;
-    while ((m = DOLLAR_RX.exec(str)) !== null) {
+    MONEY_RX.lastIndex = 0;
+    while ((m = MONEY_RX.exec(str)) !== null) {
       const n = Math.round(Number(m[1].replace(/,/g, "")));
       if (!Number.isFinite(n) || n === 0) continue;
       // Allow exact match or within rounding tolerance of any verified number.
@@ -132,7 +133,7 @@ export const validateAiReportFactuality = ({
   const fabricatedNumbers = [...fabricated];
   const warnings = fabricatedNumbers.map(
     (n) =>
-      `AI output references $${n.toLocaleString()} which is not present in verified evidence.`
+      `AI output references ${n.toLocaleString()} as a money amount which is not present in verified evidence.`
   );
 
   return {

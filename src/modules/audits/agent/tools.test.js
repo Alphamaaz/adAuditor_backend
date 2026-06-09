@@ -59,6 +59,59 @@ const umeedPrior = {
   criticalRuleIds: [],
 };
 
+const googleDeadKeywordAudit = {
+  id: "aud_google_dead_keywords",
+  selectedPlatforms: ["GOOGLE"],
+  healthScore: 76,
+  dataSource: "OAUTH",
+  businessProfileSnapshot: {
+    sectionA: { businessType: "eCommerce", targetCpa: 160 },
+  },
+  normalizedDataset: {
+    summary: {
+      totals: { spend: 43470, impressions: 100000, clicks: 3000, conversions: 270 },
+      platforms: {
+        GOOGLE: {
+          spend: 43470,
+          impressions: 100000,
+          clicks: 3000,
+          conversions: 270,
+          currency: "PKR",
+        },
+      },
+    },
+    data: {
+      platforms: {
+        GOOGLE: {
+          byLevel: {
+            campaign: [
+              { level: "campaign", name: "PMax", objective: "PERFORMANCE_MAX", spend: 35000, impressions: 70000, clicks: 2100, conversions: 240 },
+              { level: "campaign", name: "Search", objective: "SEARCH", spend: 8470, impressions: 30000, clicks: 900, conversions: 30 },
+            ],
+            keyword: [
+              { level: "keyword", keyword: "blue widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+              { level: "keyword", keyword: "red widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+              { level: "keyword", keyword: "green widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+              { level: "keyword", keyword: "yellow widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+              { level: "keyword", keyword: "white widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+            ],
+          },
+        },
+      },
+    },
+  },
+  ruleFindings: [
+    {
+      ruleId: "KW-010",
+      platform: "GOOGLE",
+      severity: "MEDIUM",
+      category: "Keyword Strategy",
+      title: "Many active Google keywords are getting zero impressions",
+      estimatedImpact: "Zero-impression active keywords inflate account clutter.",
+    },
+  ],
+};
+
 const tools = () => createDeepAuditTools({ audit: essaAudit, priorAudits: [umeedPrior] });
 
 describe("createDeepAuditTools", () => {
@@ -72,6 +125,7 @@ describe("createDeepAuditTools", () => {
       expect(out.base.cpm).toBeCloseTo(39.59, 1);
       expect(out.referenceSource).toBe("peer:Umeed Marketing");
       expect(out.decomposition.hasReference).toBe(true);
+      expect(out.comparison.available).toBe(true);
       expect(out.decomposition.dominantDriver).toBe("CTR");
       // CTR explains the overwhelming majority of the gap; CPM almost none.
       const ctr = out.decomposition.drivers.find((d) => d.name === "CTR");
@@ -92,6 +146,7 @@ describe("createDeepAuditTools", () => {
       const out = createDeepAuditTools({ audit: essaAudit, priorAudits: [] }).decomposeKpi({ kpi: "CPR" });
       expect(out.referenceSource).toBe("none");
       expect(out.decomposition.hasReference).toBe(false);
+      expect(out.comparison.available).toBe(false);
       expect(out.decomposition.dominantDriver).toBeTruthy();
     });
   });
@@ -103,6 +158,7 @@ describe("createDeepAuditTools", () => {
       expect(out.headline.dimension).toBe("age");
       expect(out.headline.worst.segment).toBe("45-54");
       expect(out.headline.worst.wastedSpend).toBe(206);
+      expect(out.headline.worst.wastedSpendFormatted).toBe("$206");
       expect(out.headline.worst.reason).toBe("zero_conversions");
       expect(out.headline.worst.significant).toBe(true);
     });
@@ -112,6 +168,28 @@ describe("createDeepAuditTools", () => {
       const out = createDeepAuditTools({ audit: bare }).analyzeSegments();
       expect(out.available).toBe(false);
       expect(out.reason).toBe("no_breakdown_data");
+    });
+  });
+
+  describe("analyzeCampaignTypes", () => {
+    it("explains where spend comes from when active keywords have zero impressions", () => {
+      const out = createDeepAuditTools({ audit: googleDeadKeywordAudit }).analyzeCampaignTypes();
+      expect(out.available).toBe(true);
+      expect(out.currency).toBe("PKR");
+      expect(out.totalSpendFormatted).toBe("PKR 43,470");
+      expect(out.types[0]).toMatchObject({
+        channelType: "PERFORMANCE_MAX",
+        spendFormatted: "PKR 35,000",
+        cpaFormatted: "PKR 146",
+      });
+      expect(out.keywordCoverage.zeroImpressionSharePct).toBe(100);
+      expect(out.deadKeywordSignal).toMatchObject({
+        available: true,
+        zeroImpressionKeywords: 5,
+        activeKeywordsTotal: 5,
+        topSpendChannelType: "PERFORMANCE_MAX",
+        topSpendFormatted: "PKR 35,000",
+      });
     });
   });
 

@@ -19,6 +19,18 @@ export const auditContextSchema = z
       .enum(["leads", "sales", "roas", "cpa_reduction", "traffic", "awareness"])
       .nullable()
       .optional(),
+    auditFocus: z
+      .enum([
+        "lower_cpa",
+        "improve_ctr",
+        "increase_roas",
+        "more_leads",
+        "diagnose_performance",
+        "other",
+      ])
+      .nullable()
+      .optional(),
+    auditFocusOther: z.string().trim().max(240).nullable().optional(),
     targetCpa: z.number().positive().nullable().optional(),
     targetRoas: z.number().positive().nullable().optional(),
     // Comma/space separated brand terms or company name. Drives the Google

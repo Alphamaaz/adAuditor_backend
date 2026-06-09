@@ -135,6 +135,56 @@ const writeAiSections = (doc, audit) => {
     output.executiveSummary.forEach((item) => paragraph(doc, item));
   }
 
+  if (output.opportunitySummary) {
+    sectionTitle(doc, "Opportunity Summary");
+    labeledValue(doc, "Biggest money leak", output.opportunitySummary.biggestMoneyLeak);
+    labeledValue(doc, "Estimated waste", output.opportunitySummary.estimatedWaste);
+    labeledValue(doc, "Estimated upside", output.opportunitySummary.estimatedUpside);
+    if (output.opportunitySummary.rankingBasis) {
+      paragraph(doc, output.opportunitySummary.rankingBasis);
+    }
+  }
+
+  if (output.hypothesisAnalyses?.length) {
+    sectionTitle(doc, "Hypothesis-Driven Diagnosis");
+    output.hypothesisAnalyses.forEach((item) => {
+      addPageIfNeeded(doc, 95);
+      doc.font("Helvetica-Bold").fontSize(11).fillColor("#171717").text(safeText(item.hypothesis));
+      (item.testsRun || []).forEach((test) => bullet(doc, test));
+      paragraph(doc, item.conclusion);
+      labeledValue(doc, "Confidence", item.confidence);
+    });
+  }
+
+  if (output.findingAnalyses?.length) {
+    sectionTitle(doc, "Major Finding Analysis");
+    output.findingAnalyses.forEach((item, index) => {
+      addPageIfNeeded(doc, 135);
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(11)
+        .fillColor("#171717")
+        .text(`${index + 1}. ${safeText(item.title)}`);
+      labeledValue(doc, "Rule", item.ruleId);
+      labeledValue(doc, "Impact", item.estimatedBusinessImpact);
+      labeledValue(doc, "Confidence", item.confidence);
+      paragraph(doc, `What is happening: ${safeText(item.whatIsHappening)}`);
+      paragraph(doc, `Why it is happening: ${safeText(item.whyItIsHappening)}`);
+      (item.evidence || []).slice(0, 4).forEach((fact) => bullet(doc, fact));
+      (item.recommendedActions || []).slice(0, 4).forEach((action) => bullet(doc, action));
+      paragraph(doc, `Expected outcome: ${safeText(item.expectedOutcome)}`);
+    });
+  }
+
+  if (output.benchmarkComparisons?.length) {
+    sectionTitle(doc, "Benchmark Comparisons");
+    output.benchmarkComparisons.forEach((item) => {
+      doc.font("Helvetica-Bold").fontSize(10).fillColor("#171717").text(safeText(item.label));
+      paragraph(doc, `${safeText(item.comparisonType)} / ${safeText(item.confidence)} confidence`);
+      paragraph(doc, item.finding);
+    });
+  }
+
   if (output.confidenceNotes?.length) {
     sectionTitle(doc, "Confidence Notes");
     output.confidenceNotes.forEach((item) => bullet(doc, item));

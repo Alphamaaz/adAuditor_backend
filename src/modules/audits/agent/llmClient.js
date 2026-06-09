@@ -30,10 +30,15 @@ const getClient = async () => {
 export const createAnthropicClient = () => ({
   async createMessage({ system, messages, tools, toolChoice }) {
     const client = await getClient();
+    // Adaptive thinking cannot be combined with a forced tool_choice — the API
+    // 400s ("Thinking may not be enabled when tool_choice forces tool use").
+    // Enable thinking only when the model is free to choose its next action.
+    const forcesTool =
+      toolChoice && (toolChoice.type === "any" || toolChoice.type === "tool");
     const res = await client.messages.create({
       model: DEEP_AUDIT_MODEL,
       max_tokens: 16000,
-      thinking: { type: "adaptive" },
+      ...(forcesTool ? {} : { thinking: { type: "adaptive" } }),
       output_config: { effort: DEEP_AUDIT_EFFORT },
       system: [
         { type: "text", text: system, cache_control: { type: "ephemeral" } },

@@ -54,6 +54,7 @@ import {
   fetchKeywordsWithMetrics,
   fetchSearchTerms,
   fetchDailySegments,
+  fetchSegmentBreakdowns,
   fetchNegativeKeywordLists,
   fetchPMaxAssets,
   fetchShoppingProducts,
@@ -70,6 +71,7 @@ import {
   normalizeShoppingProducts,
   normalizeAudienceBidding,
   normalizeGoogleDailySegments,
+  buildGoogleByDimension,
   buildGoogleNormalizedDataset,
 } from "./googleNormalizer.service.js";
 
@@ -1043,6 +1045,19 @@ export const fetchGoogleDataForAudit = async (req, res) => {
     console.warn(`[Google Ads] daily segment fetch failed (non-fatal): ${dailyErr.message}`);
   }
 
+  // Segment breakdowns (device / day-of-week / network) — BEST-EFFORT. These
+  // power per-segment waste analysis (analyzeSegments + SEG-WASTE-001). Skipped
+  // for manager accounts (segments live on sub-accounts, not the manager).
+  let googleByDimension = {};
+  try {
+    if (!customerInfo?.manager) {
+      const breakdowns = await fetchSegmentBreakdowns(accessToken, customerId, "LAST_30_DAYS");
+      googleByDimension = buildGoogleByDimension(breakdowns);
+    }
+  } catch (segErr) {
+    console.warn(`[Google Ads] segment breakdown fetch failed (non-fatal): ${segErr.message}`);
+  }
+
   const googleDataset = buildGoogleNormalizedDataset({
     campaignRecords: campaigns,
     adGroupRecords: adGroups,
@@ -1055,6 +1070,7 @@ export const fetchGoogleDataForAudit = async (req, res) => {
     audienceBiddingRecords: audienceBidding,
     currency,
     byDay: googleByDay,
+    byDimension: googleByDimension,
   });
 
   // Include 90-day campaign data for historical rules

@@ -3,6 +3,8 @@ import { runDeterministicAudit } from "../modules/audits/auditEngine.service.js"
 import { calculateUploadReadiness } from "../modules/audits/uploadReadiness.service.js";
 import { buildAiAuditContext } from "../modules/audits/aiContext.service.js";
 import { generateAiAuditReport } from "../modules/audits/aiProvider.service.js";
+import { runDeepAudit } from "../modules/audits/agent/orchestrator.js";
+import { isDeepAuditEnabled, DEEP_AUDIT_MODEL } from "../modules/audits/agent/config.js";
 import {
   validateAiReportOutput,
   validateAiReportFactuality,
@@ -10,7 +12,6 @@ import {
 } from "../modules/audits/aiReportValidation.service.js";
 import { generateAuditPdfFile } from "../modules/audits/pdfReport.service.js";
 import {
-  getAiNarrativeMode,
   recordAuditRun,
   resolveEffectivePlan,
 } from "../modules/plans/plan.resolver.js";
@@ -26,6 +27,7 @@ import {
 import {
   sumOrgAiCostUsd,
   sumGlobalAiCostUsd,
+  recordAiUsage,
 } from "../modules/audits/aiUsage.service.js";
 import {
   FREE_PLAN_FALLBACK,
@@ -43,11 +45,12 @@ const aiCapsHaveHeadroom = async ({
   subscription,
   auditId,
 }) => {
-  // Per-org monthly cap.
-  const orgCap =
-    effectivePlan?.aiMonthlyUsdCap != null
-      ? Number(effectivePlan.aiMonthlyUsdCap)
-      : FREE_PLAN_FALLBACK.aiMonthlyUsdCap;
+  // Per-org monthly cap. Only apply the free-tier fallback cap when there is
+  // no plan at all. Paid plans without an explicit cap have no per-org limit —
+  // falling back to $0.50 would incorrectly block them once they exceed it.
+  const orgCap = effectivePlan
+    ? (effectivePlan.aiMonthlyUsdCap != null ? Number(effectivePlan.aiMonthlyUsdCap) : null)
+    : FREE_PLAN_FALLBACK.aiMonthlyUsdCap;
   if (orgCap != null && Number.isFinite(orgCap)) {
     const { periodStart, periodEnd } = resolveCurrentUsagePeriod(subscription);
     const used = await sumOrgAiCostUsd({
@@ -220,15 +223,14 @@ export const processRunAudit = async ({ auditId, organizationId }) => {
     await tx.audit.update({
       where: { id: auditId },
       data: {
-        status: "COMPLETED",
+        status: "PROCESSING",
         healthScore: engineResult.scores.overall,
         categoryScores: engineResult.scores,
-        completedAt: new Date(),
       },
     });
   });
 
-  await logEvent(auditId, "AUDIT_ENGINE_COMPLETED", "Deterministic audit engine completed.", {
+  await logEvent(auditId, "AUDIT_ENGINE_COMPLETED", "Deterministic audit engine completed. Awaiting AI deep audit.", {
     healthScore: engineResult.scores.overall,
     findingCount: engineResult.findings.length,
   });
@@ -254,8 +256,7 @@ export const processRunAudit = async ({ auditId, organizationId }) => {
   }
 
   // Memory summary writer — best-effort. Powers cross-audit AI context and
-  // the score-trend chart on the dashboard. A failure here doesn't fail the
-  // audit; the audit is already COMPLETED.
+  // the score-trend chart on the dashboard.
   try {
     await writeAuditMemorySummary(auditId);
     await logEvent(auditId, "MEMORY_SUMMARY_WRITTEN", "Audit memory summary persisted.", null);
@@ -275,34 +276,33 @@ export const processRunAudit = async ({ auditId, organizationId }) => {
     });
   }
 
-  // Plan-gated auto-AI: Pro/Agency plans chain the AI narrative job
-  // automatically so users get a polished report without an extra click.
-  // Starter is "manual" (button stays), Free is `false` (no AI access).
+  // Always queue the AI/deep audit. The audit status stays PROCESSING until
+  // the AI job completes — results are not surfaced to the user until then.
   // Dynamic import avoids a circular dep with auditQueue → auditPipeline.
   let aiAutoQueued = false;
   try {
-    const { plan } = await resolveEffectivePlan(organizationId);
-    const aiMode = getAiNarrativeMode(plan);
-    if (aiMode === "automatic") {
-      const { enqueueGenerateAiReport } = await import(
-        "../queues/auditQueue.js"
-      );
-      await enqueueGenerateAiReport({ auditId });
-      aiAutoQueued = true;
-      await logEvent(
-        auditId,
-        "AI_REPORT_AUTO_QUEUED",
-        "AI report auto-queued by plan policy.",
-        { plan: plan?.slug || null }
-      );
-    }
+    const { enqueueGenerateAiReport } = await import("../queues/auditQueue.js");
+    await enqueueGenerateAiReport({ auditId });
+    aiAutoQueued = true;
+    await logEvent(
+      auditId,
+      "AI_REPORT_AUTO_QUEUED",
+      "AI deep audit auto-queued. Audit completes after AI finishes.",
+      {}
+    );
   } catch (autoAiError) {
-    // Auto-chain failures must NOT fail the audit. The user can always
-    // click "Generate AI report" manually.
+    // Queue failure: mark COMPLETED with deterministic fallback so the user
+    // is never left stuck in PROCESSING indefinitely.
+    await prisma.audit
+      .update({
+        where: { id: auditId },
+        data: { status: "COMPLETED", completedAt: new Date() },
+      })
+      .catch(() => {});
     await logEvent(
       auditId,
       "AI_REPORT_AUTO_QUEUE_FAILED",
-      "Failed to auto-queue AI report after deterministic run.",
+      "Failed to queue AI report; deterministic report is available.",
       { error: autoAiError.message }
     );
   }
@@ -366,6 +366,8 @@ const tryGenerateValidatedAiReport = async ({
         errors: validation.errors,
       });
     } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(`[auditPipeline] AI report attempt ${attempt} failed:`, error?.message, error?.details);
       attempts.push({
         attempt,
         type: "PROVIDER_ERROR",
@@ -375,6 +377,8 @@ const tryGenerateValidatedAiReport = async ({
     }
   }
 
+  // eslint-disable-next-line no-console
+  console.error(`[auditPipeline] All ${AI_REPORT_MAX_ATTEMPTS} AI report attempts failed:`, attempts);
   return { ok: false, attempts };
 };
 
@@ -421,9 +425,9 @@ export const processGenerateAiReport = async ({ auditId }) => {
   const audit = await loadAudit(auditId);
   if (!audit) throw new Error(`Audit ${auditId} not found`);
 
-  if (audit.status !== "COMPLETED" || audit.ruleFindings.length === 0) {
+  if (!["PROCESSING", "COMPLETED"].includes(audit.status) || audit.ruleFindings.length === 0) {
     throw new Error(
-      `Audit ${auditId} is not in COMPLETED state with findings; cannot run AI report.`
+      `Audit ${auditId} is not in PROCESSING or COMPLETED state with findings; cannot run AI report.`
     );
   }
 
@@ -459,14 +463,67 @@ export const processGenerateAiReport = async ({ auditId }) => {
     auditId,
   });
   if (!hasHeadroom) {
-    // Don't fail the audit — the deterministic report is already saved.
+    await prisma.audit
+      .update({
+        where: { id: auditId },
+        data: { status: "COMPLETED", completedAt: new Date() },
+      })
+      .catch(() => {});
     return { aiSkipped: true, reason: "cap_reached" };
   }
 
-  const context = buildAiAuditContext(
-    { ...audit, uploadReadiness },
-    { priorAudits }
-  );
+  const auditWithReadiness = { ...audit, uploadReadiness };
+  const context = buildAiAuditContext(auditWithReadiness, { priorAudits });
+
+  let deepAuditResult = null;
+  if (isDeepAuditEnabled()) {
+    try {
+      deepAuditResult = await runDeepAudit({
+        audit: auditWithReadiness,
+        priorAudits,
+        fallback: async ({ reason }) => ({
+          report: null,
+          reason: reason || "standard_report_continues",
+        }),
+      });
+      context.deepAudit = {
+        mode: deepAuditResult.mode,
+        report: deepAuditResult.report,
+        reasoningTrace: deepAuditResult.reasoningTrace || [],
+        reason: deepAuditResult.reason || null,
+        usage: deepAuditResult.usage || {},
+      };
+      await recordAiUsage({
+        organizationId: audit.organizationId,
+        auditId,
+        provider: "anthropic",
+        model: DEEP_AUDIT_MODEL,
+        purpose: "default_deep_audit",
+        inputTokens: deepAuditResult.usage?.inputTokens || 0,
+        outputTokens: deepAuditResult.usage?.outputTokens || 0,
+        status: String(deepAuditResult.reason || "").startsWith("error:")
+          ? "ERROR"
+          : "SUCCESS",
+        errorMessage: String(deepAuditResult.reason || "").startsWith("error:")
+          ? deepAuditResult.reason.slice(0, 500)
+          : null,
+      });
+    } catch (deepError) {
+      context.deepAudit = {
+        mode: "fallback",
+        report: null,
+        reasoningTrace: [],
+        reason: `error:${deepError.message}`,
+        usage: {},
+      };
+      await logEvent(
+        auditId,
+        "DEFAULT_DEEP_AUDIT_FAILED",
+        "Deep Audit loop failed; standard AI narrative continues.",
+        { error: deepError.message }
+      );
+    }
+  }
 
   const result = await tryGenerateValidatedAiReport({
     context,
@@ -482,6 +539,12 @@ export const processGenerateAiReport = async ({ auditId }) => {
       "AI report generation failed after retries. Deterministic report retained.",
       { attempts: result.attempts, maxAttempts: AI_REPORT_MAX_ATTEMPTS }
     );
+    await prisma.audit
+      .update({
+        where: { id: auditId },
+        data: { status: "COMPLETED", completedAt: new Date() },
+      })
+      .catch(() => {});
     return { aiFallbackUsed: true, attempts: result.attempts };
   }
 
@@ -504,6 +567,17 @@ export const processGenerateAiReport = async ({ auditId }) => {
     priorAttempts: result.attempts,
     factSourceMap,
     factualityWarnings: result.factualityWarnings || [],
+    defaultDeepAudit: context.deepAudit
+      ? {
+          mode: context.deepAudit.mode,
+          reason: context.deepAudit.reason,
+          usage: context.deepAudit.usage,
+          toolCalls: (context.deepAudit.reasoningTrace || []).map((step) => ({
+            tool: step.tool,
+            phase: step.phase,
+          })),
+        }
+      : null,
   };
 
   await prisma.aiReport.upsert({
@@ -521,6 +595,12 @@ export const processGenerateAiReport = async ({ auditId }) => {
       promptMeta,
       output: generated.output,
     },
+  });
+
+  // Deep audit is done — mark the audit COMPLETED so the frontend shows results.
+  await prisma.audit.update({
+    where: { id: auditId },
+    data: { status: "COMPLETED", completedAt: new Date() },
   });
 
   await logEvent(auditId, "AI_REPORT_GENERATED", "AI report generated and saved.", {

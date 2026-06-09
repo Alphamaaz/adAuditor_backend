@@ -234,6 +234,43 @@ export const normalizeGoogleDailySegments = (rows = []) =>
     convValue: Number(row.metrics?.conversionsValue || 0),
   }));
 
+/**
+ * Normalize account-level segment rows (device / day-of-week / network) into
+ * the byDimension record shape the rule engine + Deep Audit consume:
+ *   { dimension, segment, spend, impressions, clicks, conversions, convValue }
+ */
+const normalizeGoogleSegment = (rows, dimension, segmentKey) =>
+  (rows || [])
+    .map((row) => ({
+      dimension,
+      segment:
+        row.segments?.[segmentKey] != null
+          ? String(row.segments[segmentKey])
+          : "unknown",
+      spend: microsToUnits(row.metrics?.costMicros),
+      impressions: Number(row.metrics?.impressions || 0),
+      clicks: Number(row.metrics?.clicks || 0),
+      conversions: Number(row.metrics?.conversions || 0),
+      convValue: Number(row.metrics?.conversionsValue || 0),
+    }))
+    .filter((r) => r.spend > 0 || r.impressions > 0);
+
+/**
+ * Build the byDimension map from raw segment-breakdown rows keyed by dimension.
+ * Accepts { device, dayOfWeek, network } (Google API segment field names).
+ * Empty dimensions are omitted so the engine only sees dimensions with data.
+ */
+export const buildGoogleByDimension = (breakdowns = {}) => {
+  const byDimension = {};
+  const device = normalizeGoogleSegment(breakdowns.device, "device", "device");
+  const dayOfWeek = normalizeGoogleSegment(breakdowns.dayOfWeek, "dayOfWeek", "dayOfWeek");
+  const network = normalizeGoogleSegment(breakdowns.network, "network", "adNetworkType");
+  if (device.length) byDimension.device = device;
+  if (dayOfWeek.length) byDimension.dayOfWeek = dayOfWeek;
+  if (network.length) byDimension.network = network;
+  return byDimension;
+};
+
 export const buildGoogleNormalizedDataset = ({
   campaignRecords,
   adGroupRecords,
@@ -246,6 +283,7 @@ export const buildGoogleNormalizedDataset = ({
   audienceBiddingRecords = [],
   currency,
   byDay = [],
+  byDimension = {},
 }) => {
   const allRecords = [
     ...campaignRecords,
@@ -290,7 +328,7 @@ export const buildGoogleNormalizedDataset = ({
           files: [],
           records: allRecords,
           byLevel,
-          byDimension: {},
+          byDimension,
           byDay: Array.isArray(byDay) ? byDay : [],
           currency: currency || null,
           source: "OAUTH",

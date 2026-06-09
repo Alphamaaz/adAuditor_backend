@@ -24,7 +24,8 @@ const SEVERITY_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
 const MAX_FINDINGS = 25;
 const MAX_PRIOR_AUDITS = 3;
 
-const DOLLAR_RX = /\$\s?([\d,]+(?:\.\d+)?)/g;
+const MONEY_RX =
+  /(?:\$|USD|PKR|EUR|GBP|CAD|AUD|AED|INR|SAR|QAR|KWD|SGD|MYR|THB|PHP|IDR|BDT|LKR|NPR|ZAR)\s?([\d,]+(?:\.\d+)?)/g;
 
 /**
  * Parse the leading dollar magnitude from an estimatedImpact string so we can
@@ -32,7 +33,8 @@ const DOLLAR_RX = /\$\s?([\d,]+(?:\.\d+)?)/g;
  */
 const parseImpactDollars = (impact) => {
   if (typeof impact !== "string") return 0;
-  const match = impact.match(/\$\s?([\d,]+(?:\.\d+)?)/);
+  MONEY_RX.lastIndex = 0;
+  const match = MONEY_RX.exec(impact);
   if (!match) return 0;
   const n = Number(match[1].replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
@@ -49,8 +51,8 @@ const collectVerifiedNumbers = ({ findings, summary, businessProfile }) => {
   const addFromString = (str) => {
     if (typeof str !== "string") return;
     let m;
-    DOLLAR_RX.lastIndex = 0;
-    while ((m = DOLLAR_RX.exec(str)) !== null) {
+    MONEY_RX.lastIndex = 0;
+    while ((m = MONEY_RX.exec(str)) !== null) {
       const n = Math.round(Number(m[1].replace(/,/g, "")));
       if (Number.isFinite(n)) numbers.add(n);
     }

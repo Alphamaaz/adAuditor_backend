@@ -22,9 +22,12 @@ const countBy = (items, getKey) =>
     return acc;
   }, {});
 
+const MONEY_RX =
+  /(?:\$|USD|PKR|EUR|GBP|CAD|AUD|AED|INR|SAR|QAR|KWD|SGD|MYR|THB|PHP|IDR|BDT|LKR|NPR|ZAR)\s?([\d,]+(?:\.\d+)?)/;
+
 const parseImpactDollars = (impact) => {
   if (typeof impact !== "string") return 0;
-  const match = impact.match(/\$\s?([\d,]+(?:\.\d+)?)/);
+  const match = impact.match(MONEY_RX);
   if (!match) return 0;
   const n = Number(match[1].replace(/,/g, ""));
   return Number.isFinite(n) ? Math.round(n) : 0;

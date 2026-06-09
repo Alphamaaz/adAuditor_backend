@@ -11,9 +11,13 @@ const num = (value, fallback) => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 
-/** Master kill switch — the route 404s and nothing runs unless this is "true". */
+/**
+ * Master switch. ON by default — set DEEP_AUDIT_ENABLED=false to disable.
+ * (Note: enabling the subsystem only makes the endpoint reachable; it costs
+ * nothing until something actually triggers a run.)
+ */
 export const isDeepAuditEnabled = () =>
-  String(process.env.DEEP_AUDIT_ENABLED || "").toLowerCase() === "true";
+  String(process.env.DEEP_AUDIT_ENABLED ?? "true").toLowerCase() !== "false";
 
 /** Opus is required for the reasoning quality the loop depends on (see spec). */
 export const DEEP_AUDIT_MODEL = process.env.DEEP_AUDIT_MODEL || "claude-opus-4-8";

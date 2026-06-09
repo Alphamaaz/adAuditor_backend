@@ -30,6 +30,48 @@ const audit = {
   ],
 };
 
+const auditWithDeadKeywords = {
+  ...audit,
+  id: "aud_google_dead_keywords",
+  selectedPlatforms: ["GOOGLE"],
+  normalizedDataset: {
+    summary: {
+      totals: { spend: 43470, impressions: 100000, clicks: 3000, conversions: 270 },
+      platforms: {
+        GOOGLE: { spend: 43470, impressions: 100000, clicks: 3000, conversions: 270, currency: "PKR" },
+      },
+    },
+    data: {
+      platforms: {
+        GOOGLE: {
+          byLevel: {
+            campaign: [
+              { level: "campaign", name: "PMax", objective: "PERFORMANCE_MAX", spend: 35000, impressions: 70000, clicks: 2100, conversions: 240 },
+            ],
+            keyword: [
+              { level: "keyword", keyword: "blue widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+              { level: "keyword", keyword: "red widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+              { level: "keyword", keyword: "green widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+              { level: "keyword", keyword: "yellow widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+              { level: "keyword", keyword: "white widgets", status: "ACTIVE", impressions: 0, spend: 0 },
+            ],
+          },
+        },
+      },
+    },
+  },
+  ruleFindings: [
+    {
+      ruleId: "KW-010",
+      platform: "GOOGLE",
+      severity: "MEDIUM",
+      category: "Keyword Strategy",
+      title: "Many active Google keywords are getting zero impressions",
+      estimatedImpact: "Zero-impression active keywords inflate account clutter.",
+    },
+  ],
+};
+
 const text = (t) => ({ type: "text", text: t });
 const toolUse = (id, name, input) => ({ type: "tool_use", id, name, input });
 const resp = (content, usage = { input_tokens: 100, output_tokens: 50 }) => ({
@@ -96,6 +138,30 @@ describe("runDeepAudit", () => {
     expect(out.mode).toBe("deep");
     expect(out.reasoningTrace).toHaveLength(2);
     expect(client.calls.length).toBe(4); // proves the premature attempt was bounced
+  });
+
+  it("requires campaign-type analysis before concluding when KW-010 is present", async () => {
+    const client = scripted([
+      resp([toolUse("t1", "getEvidencePacket", {})]),
+      resp([toolUse("t2", "decomposeKpi", { kpi: "CPA" })]),
+      resp([toolUse("c1", "concludeAudit", REPORT)]), // rejected: KW-010 needs campaign-type check
+      resp([toolUse("t3", "analyzeCampaignTypes", {})]),
+      resp([toolUse("c2", "concludeAudit", REPORT)]),
+    ]);
+
+    const out = await runDeepAudit({
+      audit: auditWithDeadKeywords,
+      priorAudits: [],
+      llmClient: client,
+    });
+
+    expect(out.mode).toBe("deep");
+    expect(out.reasoningTrace.map((step) => step.tool)).toEqual([
+      "getEvidencePacket",
+      "decomposeKpi",
+      "analyzeCampaignTypes",
+    ]);
+    expect(client.calls.length).toBe(5);
   });
 
   it("degrades to fallback when the token budget is exceeded", async () => {

@@ -150,7 +150,8 @@ export const highestResolvedRules = async (opts = {}) => {
  * Loose regex; intended as a directional metric, not finance-grade.
  * Returns: [{ ruleId, totalFindings, totalEstimatedSavings }]
  */
-const DOLLAR_RX = /\$([\d,]+(?:\.\d+)?)/;
+const MONEY_RX =
+  /(?:\$|USD|PKR|EUR|GBP|CAD|AUD|AED|INR|SAR|QAR|KWD|SGD|MYR|THB|PHP|IDR|BDT|LKR|NPR|ZAR)\s?([\d,]+(?:\.\d+)?)/;
 
 export const estimatedSavingsByRule = async (opts = {}) => {
   const { since, until } = defaultWindow(opts);
@@ -169,7 +170,7 @@ export const estimatedSavingsByRule = async (opts = {}) => {
         totalEstimatedSavings: 0,
       };
     entry.totalFindings += 1;
-    const match = f.estimatedImpact?.match(DOLLAR_RX);
+    const match = f.estimatedImpact?.match(MONEY_RX);
     if (match) {
       const amount = Number(match[1].replace(/,/g, ""));
       if (Number.isFinite(amount)) entry.totalEstimatedSavings += amount;

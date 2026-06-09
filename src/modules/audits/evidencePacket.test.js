@@ -89,6 +89,15 @@ describe("validateAiReportFactuality", () => {
     expect(r.fabricatedNumbers).toContain(9999);
   });
 
+  it("flags invented PKR figures too", () => {
+    const r = validateAiReportFactuality({
+      output: { executiveSummary: ["This account is wasting PKR 9,999 per month."] },
+      verifiedNumbers: [1200],
+    });
+    expect(r.ok).toBe(false);
+    expect(r.fabricatedNumbers).toContain(9999);
+  });
+
   it("tolerates rounding drift within ±1", () => {
     const r = validateAiReportFactuality({
       output: { s: "about $1,201" },
@@ -148,6 +157,7 @@ describe("evidencePacket comparison block", () => {
 describe("parseImpactDollars", () => {
   it("parses leading dollar magnitude", () => {
     expect(__test__.parseImpactDollars("$4,280 in waste")).toBe(4280);
+    expect(__test__.parseImpactDollars("PKR 4,799 in waste")).toBe(4799);
     expect(__test__.parseImpactDollars("no dollar here")).toBe(0);
   });
 });

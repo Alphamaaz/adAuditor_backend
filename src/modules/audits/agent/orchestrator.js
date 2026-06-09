@@ -97,6 +97,8 @@ export const runDeepAudit = async ({
   // result shape is stable regardless of what the injected fallback returns,
   // and never throws (a broken fallback still yields a usable result).
   const degrade = async (reason) => {
+    // eslint-disable-next-line no-console
+    console.error(`[deepAudit] degraded to fallback — reason: ${reason}`);
     let fb = {};
     try {
       fb = (await fallback({ reason, audit, reasoningTrace, usage })) || {};
@@ -120,6 +122,9 @@ export const runDeepAudit = async ({
     const modelTools = [...TOOL_SCHEMAS, CONCLUDE_TOOL];
 
     const evidencePacket = tools.getEvidencePacket();
+    const needsCampaignTypeCheck = (evidencePacket.topFindings || []).some(
+      (finding) => finding.ruleId === "KW-010"
+    );
     const messages = [
       { role: "user", content: buildSeedMessage(evidencePacket) },
     ];
@@ -179,7 +184,10 @@ export const runDeepAudit = async ({
 
       for (const call of calls) {
         if (call.name === CONCLUDE_TOOL_NAME) {
-          if (disconfirmSatisfied || forceConclude) {
+          const campaignTypeSatisfied =
+            !needsCampaignTypeCheck ||
+            reasoningTrace.some((step) => step.tool === "analyzeCampaignTypes");
+          if ((disconfirmSatisfied || forceConclude) && campaignTypeSatisfied) {
             conclusion = call.input;
             // No tool_result needed — we exit after accepting.
           } else {
@@ -188,8 +196,9 @@ export const runDeepAudit = async ({
               type: "tool_result",
               tool_use_id: call.id,
               is_error: true,
-              content:
-                "Premature conclusion. Run at least one disconfirming check first, then call concludeAudit again.",
+              content: !campaignTypeSatisfied
+                ? "Campaign-type check required. KW-010 is present, so call analyzeCampaignTypes before concluding."
+                : "Premature conclusion. Run at least one disconfirming check first, then call concludeAudit again.",
             });
           }
           continue;

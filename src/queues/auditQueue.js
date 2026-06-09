@@ -49,8 +49,14 @@ export const initializeAuditQueueProcessors = () => {
       return await processGenerateAiReport(data);
     } catch (error) {
       // AI failure does NOT mark the audit FAILED — the deterministic report
-      // is the floor. Log an event and return (the pipeline's own fallback
-      // already covers this; this catch handles unexpected throws).
+      // is the floor. Ensure the audit is COMPLETED so the user is never
+      // stranded in PROCESSING indefinitely.
+      await prisma.audit
+        .update({
+          where: { id: data.auditId },
+          data: { status: "COMPLETED", completedAt: new Date() },
+        })
+        .catch(() => {});
       await prisma.auditEvent
         .create({
           data: {

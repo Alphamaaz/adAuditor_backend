@@ -231,6 +231,56 @@ const getPlatformSummary = (dataset, platform) =>
     reach: 0,
   };
 
+/**
+ * Resolve the account's reporting currency for a finding's platform, falling
+ * back to any platform's currency, then the account total.
+ */
+const getReportCurrency = (dataset, platform) => {
+  const direct = platform && dataset?.summary?.platforms?.[platform]?.currency;
+  if (direct) return direct;
+  const platforms = dataset?.summary?.platforms || {};
+  for (const key of Object.keys(platforms)) {
+    if (platforms[key]?.currency) return platforms[key].currency;
+  }
+  return dataset?.summary?.totals?.currency || null;
+};
+
+// The engine writes money as "$<number>". For non-USD accounts that mislabels
+// the figure (a PKR account shown "$36,663" reads as if it spent dollars).
+// Re-label the "$" marker with the account's currency code.
+const localizeMoney = (value, currency) =>
+  typeof value === "string" && currency && currency !== "USD"
+    ? value.replace(/\$(?=\d)/g, `${currency} `)
+    : value;
+
+const formatMoney = (value, currency) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const formatted = Math.round(n).toLocaleString("en-US");
+  return currency && currency !== "USD" ? `${currency} ${formatted}` : `$${formatted}`;
+};
+
+/**
+ * Rewrite hardcoded "$" money in finding copy to the account's real currency.
+ * Applied once after all findings are built — single chokepoint, so every
+ * rule's dollar figures are localized without threading currency into each.
+ */
+const localizeFindingsCurrency = (findings, dataset) => {
+  for (const finding of findings) {
+    const currency = getReportCurrency(dataset, finding.platform);
+    if (!currency || currency === "USD") continue;
+    finding.title = localizeMoney(finding.title, currency);
+    finding.detail = localizeMoney(finding.detail, currency);
+    finding.estimatedImpact = localizeMoney(finding.estimatedImpact, currency);
+    if (Array.isArray(finding.fixSteps)) {
+      finding.fixSteps = finding.fixSteps.map((step) =>
+        localizeMoney(step, currency)
+      );
+    }
+  }
+  return findings;
+};
+
 const getTrackingCategory = (platform) =>
   ({ META: "Tracking & Pixel Health", GOOGLE: "Conversion Tracking Setup", TIKTOK: "Pixel & Tracking Health" })[platform] ||
   "Attribution & Reporting";
@@ -1011,7 +1061,9 @@ const addGoogleFindings = ({ audit, dataset, findings }) => {
     const minGoogleThreshold = Math.max(50, totalGoogleCampaignSpend2 * 0.01);
     const zeroConvCampaigns = googleCampaigns.filter((record) => {
       const recordSpend = numberValue(record.spend);
-      const recordConversions = numberValue(record.conversions);
+      // Google campaign records store conversions as `results`; fall back so we
+      // don't flag converting campaigns as zero-conversion (false positive).
+      const recordConversions = numberValue(record.conversions ?? record.results);
       return (
         recordSpend >= minGoogleThreshold &&
         recordConversions === 0 &&
@@ -2383,9 +2435,15 @@ const addSegmentFindings = ({ audit, dataset, findings }) => {
     const severity =
       wasteShare >= 0.3 ? "CRITICAL" : wasteShare >= 0.1 ? "HIGH" : "MEDIUM";
 
-    const wasteStr = `$${Math.round(worst.wastedSpend).toLocaleString()}`;
-    const cpaStr = worst.cpa != null ? `$${worst.cpa}` : "no conversions";
-    const baseStr = baseCpa != null ? `$${baseCpa}` : "n/a";
+    const currency = getReportCurrency(dataset, platform);
+    const wasteStr = formatMoney(worst.wastedSpend, currency);
+    const spendStr = formatMoney(worst.spend, currency);
+    const cpaStr = worst.cpa != null ? formatMoney(worst.cpa, currency) : "no conversions";
+    const baseStr = baseCpa != null ? formatMoney(baseCpa, currency) : "n/a";
+    const confirmStep =
+      worst.dimension === "day_of_week" || worst.dimension === "weekday"
+        ? "Validate the day-of-week pattern on a longer lookback before applying a permanent schedule exclusion; start with a conservative bid adjustment."
+        : `Exclude or down-bid the ${worst.segment} segment after confirming the trend on the next full reporting cycle.`;
 
     findings.push(
       createFinding({
@@ -2396,16 +2454,21 @@ const addSegmentFindings = ({ audit, dataset, findings }) => {
         title: `The ${worst.segment} ${worst.dimension} segment is wasting ${wasteStr}`,
         detail:
           worst.reason === "zero_conversions"
-            ? `The ${worst.segment} ${worst.dimension} segment spent ${wasteStr} with zero conversions vs a platform baseline CPA of ${baseStr}.`
+            ? `The ${worst.segment} ${worst.dimension} segment spent ${spendStr} with zero conversions vs a platform baseline CPA of ${baseStr}.`
             : `The ${worst.segment} ${worst.dimension} segment runs at ${cpaStr} CPA vs a ${baseStr} platform baseline — ${wasteStr} of that spend is excess cost above baseline efficiency.`,
         evidence: {
           dimension: worst.dimension,
           segment: worst.segment,
+          currency: currency || "USD",
           spend: Math.round(worst.spend),
+          spendFormatted: spendStr,
           conversions: worst.conversions,
           segmentCpa: worst.cpa,
+          segmentCpaFormatted: worst.cpa != null ? cpaStr : null,
           baselineCpa: baseCpa,
+          baselineCpaFormatted: baseStr,
           estimatedWaste: Math.round(worst.wastedSpend),
+          estimatedWasteFormatted: wasteStr,
           wasteSharePercent: Number((wasteShare * 100).toFixed(1)),
           reason: worst.reason,
           sampleNote: worst.sampleNote,
@@ -2413,7 +2476,7 @@ const addSegmentFindings = ({ audit, dataset, findings }) => {
         estimatedImpact: `${wasteStr} in this segment is recoverable by reducing or excluding it. Reallocate to segments performing at or below the ${baseStr} baseline CPA.`,
         fixSteps: [
           `Review the ${worst.segment} ${worst.dimension} segment in the platform UI to confirm the underperformance.`,
-          `Exclude or down-bid the ${worst.segment} segment if the trend holds over a 7-day window.`,
+          confirmStep,
           "Reallocate the recovered budget to segments at or below baseline CPA.",
         ],
       })
@@ -2538,6 +2601,10 @@ export const runDeterministicAudit = (audit) => {
   addOpportunityFindings({ audit, dataset, findings });
   addSegmentFindings({ audit, dataset, findings });
   addCompoundFindings({ audit, findings });
+
+  // Re-label money to the account's real currency BEFORE the summary is built,
+  // so executive summary + priorities (which copy finding copy) inherit it.
+  localizeFindingsCurrency(findings, dataset);
 
   const scores = calculateScores({ audit, findings });
   const report = buildDeterministicSummary({ audit, dataset, findings, scores });

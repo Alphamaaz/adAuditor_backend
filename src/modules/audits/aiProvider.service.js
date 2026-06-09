@@ -44,7 +44,7 @@ const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION = "2023-06-01";
 
 const getAiConfig = () => ({
-  provider: (process.env.AI_PROVIDER || "gemini").toLowerCase(),
+  provider: (process.env.AI_PROVIDER || "anthropic").toLowerCase(),
 });
 
 const getDeepSeekConfig = () => ({
@@ -67,9 +67,9 @@ const getGeminiConfig = () => ({
 
 const getAnthropicConfig = () => ({
   apiKey: process.env.ANTHROPIC_API_KEY,
-  model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5",
+  model: process.env.ANTHROPIC_MODEL || "claude-opus-4-8",
   timeoutMs: Number(process.env.ANTHROPIC_TIMEOUT_MS || 60000),
-  maxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS || 4000),
+  maxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS || 9000),
   temperature: Number(process.env.ANTHROPIC_TEMPERATURE || 0.2),
 });
 
@@ -144,6 +144,177 @@ const extractJsonObjectText = (text) => {
 
 const parseJsonObject = (text) => JSON.parse(extractJsonObjectText(text));
 
+const confidenceFromFinding = (finding = {}) => {
+  const e = finding.evidence || {};
+  if (typeof e.confidence === "string") {
+    const value = e.confidence.toLowerCase();
+    if (["high", "medium", "low"].includes(value)) return value;
+  }
+  if (String(e.sampleNote || "").toLowerCase().includes("low sample")) return "medium";
+  if (finding.severity === "CRITICAL" || finding.severity === "HIGH") return "high";
+  return "medium";
+};
+
+const easeFromFinding = (finding = {}) => {
+  const steps = Array.isArray(finding.fixSteps) ? finding.fixSteps.length : 0;
+  const text = `${finding.title || ""} ${finding.detail || ""}`.toLowerCase();
+  if (text.includes("tracking") || text.includes("capi") || text.includes("pixel")) return "hard";
+  if (steps > 3 || finding.severity === "CRITICAL") return "medium";
+  return "easy";
+};
+
+const evidenceBulletsFromFinding = (finding = {}) => {
+  const evidence = finding.evidence && typeof finding.evidence === "object"
+    ? finding.evidence
+    : {};
+  const bullets = [];
+  for (const [key, value] of Object.entries(evidence)) {
+    if (value === null || value === undefined || Array.isArray(value) || typeof value === "object") {
+      continue;
+    }
+    bullets.push(`${key}: ${String(value)}`);
+    if (bullets.length >= 4) break;
+  }
+  if (finding.estimatedImpact) bullets.unshift(`Impact: ${finding.estimatedImpact}`);
+  if (finding.detail) bullets.push(finding.detail);
+  return bullets.slice(0, 6);
+};
+
+const normalizeReportOutput = (output, context) => {
+  const report = output && typeof output === "object" ? { ...output } : {};
+  const topFindings = context?.evidencePacket?.topFindings || [];
+  const ruleFindings = context?.ruleFindings || [];
+  const focus = context?.audit?.businessProfileSnapshot?.sectionA?.auditFocus || null;
+  const deep = context?.deepAudit || null;
+  const primary = topFindings[0] || ruleFindings[0] || null;
+
+  report.opportunitySummary ||= {
+    biggestMoneyLeak: primary?.title || null,
+    estimatedWaste: primary?.estimatedImpact || null,
+    estimatedUpside: primary?.estimatedImpact || null,
+    auditFocus: focus,
+    rankingBasis:
+      "Findings are ranked by estimated recoverable spend or revenue, then confidence, then ease of implementation.",
+  };
+
+  if (!Array.isArray(report.topPriorities) || report.topPriorities.length === 0) {
+    report.topPriorities = topFindings.slice(0, 5).map((finding) => ({
+      ruleId: finding.ruleId,
+      platform: finding.platform ?? null,
+      severity: finding.severity,
+      title: finding.title,
+      estimatedImpact: finding.estimatedImpact || "Impact not quantified from available data.",
+      recommendedAction: Array.isArray(finding.fixSteps) && finding.fixSteps.length
+        ? finding.fixSteps[0]
+        : "Address this finding first because it is among the highest-impact verified issues.",
+    }));
+  }
+
+  if (!Array.isArray(report.quickWins) || report.quickWins.length === 0) {
+    report.quickWins = topFindings.slice(0, 5).map((finding) => ({
+      ruleId: finding.ruleId,
+      platform: finding.platform ?? null,
+      title: finding.title,
+      fixSteps: Array.isArray(finding.fixSteps) && finding.fixSteps.length
+        ? finding.fixSteps.slice(0, 3)
+        : ["Review the affected setting in the platform UI and apply the recommended fix."],
+    }));
+  }
+
+  if (
+    !Array.isArray(report.clientReadyRecommendations) ||
+    report.clientReadyRecommendations.length === 0
+  ) {
+    report.clientReadyRecommendations = topFindings.slice(0, 5).map((finding) => ({
+      headline: finding.title,
+      explanation: finding.detail || finding.estimatedImpact || "This finding should be prioritized based on the verified audit evidence.",
+      nextSteps: Array.isArray(finding.fixSteps) && finding.fixSteps.length
+        ? finding.fixSteps.slice(0, 4)
+        : ["Assign this item to the media buyer and verify the change in the next audit."],
+      sourceRuleIds: [finding.ruleId],
+    }));
+  }
+
+  if (!Array.isArray(report.findingAnalyses) || report.findingAnalyses.length === 0) {
+    report.findingAnalyses = topFindings.slice(0, 6).map((finding) => ({
+      ruleId: finding.ruleId,
+      platform: finding.platform ?? null,
+      title: finding.title,
+      whatIsHappening: finding.detail || finding.title,
+      whyItIsHappening: finding.evidence?.reason
+        ? `The deterministic evidence flags the driver as ${String(finding.evidence.reason).replace(/_/g, " ")}.`
+        : deep?.report?.rootCause || "The rule evidence points to an efficiency or tracking constraint in this part of the account.",
+      evidence: evidenceBulletsFromFinding(finding),
+      estimatedBusinessImpact: finding.estimatedImpact || "Impact not quantified from available data.",
+      confidence: confidenceFromFinding(finding),
+      easeOfImplementation: easeFromFinding(finding),
+      recommendedActions: Array.isArray(finding.fixSteps) && finding.fixSteps.length
+        ? finding.fixSteps.slice(0, 5)
+        : ["Review the affected platform area and apply the recommended fix."],
+      expectedOutcome:
+        "After fixing, wasted spend should decline and the affected KPI should move closer to the account benchmark or declared target.",
+    }));
+  }
+
+  if (!Array.isArray(report.hypothesisAnalyses) || report.hypothesisAnalyses.length === 0) {
+    report.hypothesisAnalyses = [
+      {
+        hypothesis: deep?.report?.headline || primary?.title || "The largest verified finding is the primary performance bottleneck.",
+        testsRun: deep?.reasoningTrace?.length
+          ? deep.reasoningTrace.map((step) => `Ran ${step.tool}${step.phase ? ` (${step.phase})` : ""}`).slice(0, 6)
+          : ["Ranked deterministic findings by impact", "Checked data confidence", "Reviewed benchmark, peer, and historical evidence where available"],
+        conclusion: deep?.report?.rootCause || primary?.detail || "The evidence supports prioritizing the largest verified finding first.",
+        confidence: deep?.report?.confidence || (primary ? confidenceFromFinding(primary) : "medium"),
+        sourceRuleIds: primary ? [primary.ruleId] : [],
+      },
+    ];
+  }
+
+  if (!Array.isArray(report.benchmarkComparisons) || report.benchmarkComparisons.length === 0) {
+    const comparisons = [];
+    for (const item of report.comparisonInsights || []) {
+      comparisons.push({ label: "Peer comparison", comparisonType: "peer", finding: item, confidence: "high" });
+    }
+    for (const item of report.memoryInsights || []) {
+      comparisons.push({ label: "Historical performance", comparisonType: "historical", finding: item, confidence: "medium" });
+    }
+    const benchmarkRules = topFindings.filter((finding) =>
+      String(finding.ruleId || "").includes("BENCH") ||
+      String(finding.category || "").toLowerCase().includes("benchmark")
+    );
+    for (const finding of benchmarkRules) {
+      comparisons.push({
+        label: finding.title,
+        comparisonType: "industry",
+        finding: finding.detail || finding.estimatedImpact || finding.title,
+        confidence: confidenceFromFinding(finding),
+      });
+    }
+    report.benchmarkComparisons = comparisons.slice(0, 6);
+  }
+
+  report.auditNarrativeVersion ||= "v3-deep-default";
+  report.segmentInsights ||= [];
+  report.comparisonInsights ||= [];
+  report.memoryInsights ||= [];
+  report.risksAndAssumptions ||= [];
+  if (!Array.isArray(report.confidenceNotes) || report.confidenceNotes.length === 0) {
+    report.confidenceNotes = [
+      "Data confidence depends on uploaded/API coverage and tracking findings shown in the audit.",
+    ];
+  }
+  if (!Array.isArray(report.executiveSummary) || report.executiveSummary.length < 2) {
+    report.executiveSummary = primary
+      ? [
+          `Health score is ${context?.audit?.healthScore ?? "not available"}/100. The largest verified issue is ${primary.title}.`,
+          primary.estimatedImpact || primary.detail || "Prioritize the highest-impact findings first.",
+        ]
+      : ["No major issues were found in the available data.", "Review data coverage before making large budget decisions."];
+  }
+
+  return report;
+};
+
 // ── Prompt builders ───────────────────────────────────────────────────────────
 
 const buildSystemPrompt = () =>
@@ -175,12 +346,23 @@ WRITING RULES — follow these without exception:
 
 11. PRIORITY ORDER: Rank and lead with findings in this order: (a) highest verified dollar impact (evidencePacket.topFindings are pre-sorted by estimatedImpactDollars — respect that order), (b) tracking/data-reliability issues (evidencePacket.dataConfidence), (c) segment-waste findings (SEG-WASTE-*), (d) peer-comparison gaps (evidencePacket.comparison.peer), (e) memory regression/improvement (evidencePacket.comparison.selfOverTime).`;
 
+const DEEP_REPORTING_RULES = `DEFAULT DEEP AUDIT REQUIREMENTS:
+- Treat this as the main client-facing audit, not a short rule summary.
+- Produce a substantially deeper strategist report: executive diagnosis, hypothesis tests, detailed finding analysis, benchmarks, and expected outcomes.
+- For major performance findings, investigate root causes. If high CPA is present, discuss the diagnostic path using only supplied facts: CPM, CTR, conversion rate, peers, benchmarks, segment waste, campaign type, and tracking reliability.
+- Every major finding must include what is happening, why it is happening, evidence, estimated business impact, confidence, recommended actions, and expected outcome after fixing.
+- If auditFocus is supplied, use it only to guide prioritization and wording. Still audit the whole account and surface hidden issues outside that focus.
+- Rank findings by estimated recoverable spend/revenue first, confidence second, and ease of implementation third.`;
+
 const buildUserPrompt = (context) => {
   const bp = context?.audit?.businessProfileSnapshot?.sectionA || {};
   const totals = context?.normalizedSummary?.totals || {};
   const healthScore = context?.audit?.healthScore ?? "N/A";
   const platforms = (context?.audit?.selectedPlatforms || []).join(", ");
   const hasPriorAudits = (context?.priorAudits || []).length > 0;
+  const auditFocus = bp.auditFocus || null;
+  const auditFocusOther = bp.auditFocusOther || null;
+  const deepAudit = context?.deepAudit || null;
   const promptEvidencePacket = context?.evidencePacket
     ? {
         ...context.evidencePacket,
@@ -207,11 +389,33 @@ const buildUserPrompt = (context) => {
     `• Platforms audited: ${platforms}`,
     hasPriorAudits ? `• Prior audit data available: YES — reference trends explicitly` : "• Prior audit data: none",
   ].filter(Boolean).join("\n");
+  const focusHint = auditFocus
+    ? `${auditFocus}${auditFocus === "other" && auditFocusOther ? ` (${auditFocusOther})` : ""}`
+    : "diagnose_performance";
+  const deepAuditContext = deepAudit?.report
+    ? JSON.stringify({
+        mode: deepAudit.mode,
+        headline: deepAudit.report.headline,
+        rootCause: deepAudit.report.rootCause,
+        confidence: deepAudit.report.confidence,
+        drivers: deepAudit.report.drivers,
+        recommendations: deepAudit.report.recommendations,
+        toolsRun: (deepAudit.reasoningTrace || []).map((step) => step.tool),
+      })
+    : "No separate Deep Audit loop result was available; use the evidence packet and deterministic findings.";
 
   return `Write the AI narrative for this paid advertising audit. Return ONLY valid JSON — no markdown, no preamble, no explanation outside the JSON.
 
 KEY ACCOUNT FACTS (extracted for quick reference — all values also in the full context below):
 ${contextHints}
+
+AUDIT FOCUS:
+${focusHint}
+
+${DEEP_REPORTING_RULES}
+
+DEEP AUDIT HYPOTHESIS RESULT:
+${deepAuditContext}
 
 REQUIRED JSON OUTPUT:
 
@@ -244,13 +448,19 @@ REQUIRED JSON OUTPUT:
       "sourceRuleIds": ["RULE-ID-FROM-CONTEXT"]
     }
   ],
-  "auditNarrativeVersion": "v2-evidence-packet",
+  "auditNarrativeVersion": "v3-deep-default",
   "dataConfidenceSummary": "one sentence on data reliability from evidencePacket.dataConfidence (or null)",
   "segmentInsights": ["segment-level facts from SEG-WASTE-* findings, with the exact segment + dollar from evidence"],
   "comparisonInsights": ["facts from evidencePacket.comparison.peer — name the peer account + the exact metric gap"],
   "memoryInsights": ["facts from evidencePacket.comparison.selfOverTime — quote the exact delta vs the prior audit date"],
   "risksAndAssumptions": ["any caveat: limited sample, missing targets, tracking unreliability — drawn from evidence sampleNote/confidence fields"]
 }
+
+ADDITIONAL REQUIRED DEEP FIELDS:
+- opportunitySummary: summarize the biggest money leak, estimated waste, estimated upside, audit focus, and ranking basis.
+- findingAnalyses: write 4 to 8 detailed finding analyses. Each must include what is happening, why it is happening, evidence, estimated business impact, confidence, ease, recommended actions, and expected outcome.
+- hypothesisAnalyses: explain the root-cause hypotheses tested. For CPA/ROAS/CTR issues, reference the diagnostic checks available in the evidence/deepAudit context.
+- benchmarkComparisons: include industry, historical, and peer comparisons when available. Empty array only when no benchmark/comparison facts exist.
 
 SECTION-BY-SECTION INSTRUCTIONS:
 
@@ -348,7 +558,7 @@ const generateDeepSeekAuditReport = async ({ context }) => {
         response_format: {
           type: "json_object",
         },
-        max_tokens: Number(process.env.DEEPSEEK_MAX_TOKENS || 4000),
+        max_tokens: Number(process.env.DEEPSEEK_MAX_TOKENS || 9000),
         temperature: Number(process.env.DEEPSEEK_TEMPERATURE || 0.2),
       }),
     });
@@ -415,7 +625,7 @@ const generateGeminiAuditReport = async ({ context }) => {
           ],
           generationConfig: {
             responseMimeType: "application/json",
-            maxOutputTokens: Number(process.env.GEMINI_MAX_OUTPUT_TOKENS || 4000),
+            maxOutputTokens: Number(process.env.GEMINI_MAX_OUTPUT_TOKENS || 9000),
             temperature: Number(process.env.GEMINI_TEMPERATURE || 0.2),
           },
         }),
@@ -474,7 +684,9 @@ const generateAnthropicAuditReport = async ({ context }) => {
       body: JSON.stringify({
         model: config.model,
         max_tokens: config.maxTokens,
-        temperature: config.temperature,
+        // Opus 4.7/4.8 reject sampling params (400); only send temperature to
+        // models that accept it (Sonnet / Haiku / older).
+        ...(/opus-4-(7|8)/.test(config.model) ? {} : { temperature: config.temperature }),
         system: buildSystemPrompt(),
         messages: [
           {
@@ -614,6 +826,7 @@ export const generateAiAuditReport = async ({
 
   try {
     const result = await providerCall({ context: safeContext });
+    result.output = normalizeReportOutput(result.output, safeContext);
     // Best-effort cost tracking. Never blocks the audit.
     await recordAiUsage({
       organizationId,

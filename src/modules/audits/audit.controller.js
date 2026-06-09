@@ -60,6 +60,8 @@ const buildSnapshotFromContext = (existingAnswers, context) => {
     "businessType",
     "monthlyBudget",
     "mainGoal",
+    "auditFocus",
+    "auditFocusOther",
     "targetCpa",
     "targetRoas",
     "brandTerms",

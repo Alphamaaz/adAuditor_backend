@@ -38,9 +38,19 @@ import { getBenchmark } from "../auditEngine.service.js";
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
+const MONEY_RX =
+  /(?:\$|USD|PKR|EUR|GBP|CAD|AUD|AED|INR|SAR|QAR|KWD|SGD|MYR|THB|PHP|IDR|BDT|LKR|NPR|ZAR)\s?([\d,]+(?:\.\d+)?)/;
+
+const formatMoney = (value, currency) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const formatted = Math.round(n).toLocaleString("en-US");
+  return currency && currency !== "USD" ? `${currency} ${formatted}` : `$${formatted}`;
+};
+
 const parseImpactDollars = (impact) => {
   if (typeof impact !== "string") return 0;
-  const m = impact.match(/\$\s?([\d,]+(?:\.\d+)?)/);
+  const m = impact.match(MONEY_RX);
   if (!m) return 0;
   const n = Number(m[1].replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
@@ -53,6 +63,16 @@ const businessTypeOf = (audit) =>
 
 const platformData = (audit, platform) =>
   audit?.normalizedDataset?.data?.platforms?.[platform] || null;
+
+const reportCurrency = (audit, platform) => {
+  const direct = platform && audit?.normalizedDataset?.summary?.platforms?.[platform]?.currency;
+  if (direct) return direct;
+  const platforms = audit?.normalizedDataset?.summary?.platforms || {};
+  for (const summary of Object.values(platforms)) {
+    if (summary?.currency) return summary.currency;
+  }
+  return audit?.normalizedDataset?.summary?.totals?.currency || "USD";
+};
 
 const accountTotals = (audit) => {
   const totals = audit?.normalizedDataset?.summary?.totals || {};
@@ -144,6 +164,10 @@ export const createDeepAuditTools = ({ audit, priorAudits = [] } = {}) => {
           cpc: actual.cpc,
         }),
         referenceSource: "none",
+        comparison: {
+          available: false,
+          note: "ROAS driver shares are magnitude-only; rely on the target-based diagnosis, not a single dominant driver.",
+        },
       };
     }
 
@@ -166,10 +190,20 @@ export const createDeepAuditTools = ({ audit, priorAudits = [] } = {}) => {
     }
 
     const ctrBenchmark = getBenchmark("ctr", primaryPlatform(audit), businessTypeOf(audit));
+    const decomposition = decomposeCpa(actual, reference);
+    // A driver attribution is only trustworthy with a real baseline AND a
+    // material gap. No peer (hasReference false) or a near-identical peer
+    // (<3% CPA gap) → the "dominant driver" is noise; flag it so the model
+    // doesn't present it as the root cause.
+    const refCpa = reference?.cpa;
+    const cpaGapPct =
+      refCpa && actual.cpa ? Math.abs((actual.cpa - refCpa) / refCpa) : null;
+    const meaningfulReference =
+      decomposition?.hasReference === true && cpaGapPct != null && cpaGapPct >= 0.03;
     return {
       metric,
       base: actual,
-      decomposition: decomposeCpa(actual, reference),
+      decomposition,
       diagnosis: diagnoseCpaDriver({
         actualCpa: actual.cpa,
         targetCpa: num(bp.targetCpa) || null,
@@ -178,28 +212,180 @@ export const createDeepAuditTools = ({ audit, priorAudits = [] } = {}) => {
         benchmarkCtrGood: ctrBenchmark?.good ?? null,
       }),
       referenceSource,
+      comparison: meaningfulReference
+        ? {
+            available: true,
+            source: referenceSource,
+            cpaGapPct: +(cpaGapPct * 100).toFixed(1),
+          }
+        : {
+            available: false,
+            note: decomposition?.hasReference
+              ? "The comparison baseline is within ~3% of this account — the gap is negligible, so driver attribution would be noise. Do not name a dominant driver; rely on the benchmark diagnosis and the deterministic findings."
+              : "No comparable peer account was available, so the driver shares are magnitude-only — NOT a measured gap vs a baseline. Do not name a single dominant driver as the root cause; rely on the benchmark diagnosis and the deterministic findings, and state plainly that no peer comparison was available.",
+          },
     };
   };
 
   const analyzeSegments = ({ dimension } = {}) => {
-    const pd = platformData(audit, primaryPlatform(audit));
+    const platform = primaryPlatform(audit);
+    const pd = platformData(audit, platform);
     const byDimension = pd?.byDimension || {};
     const dims = (dimension ? [dimension] : Object.keys(byDimension)).filter(
       (d) => Array.isArray(byDimension[d]) && byDimension[d].length > 0
     );
     if (dims.length === 0) return { available: false, reason: "no_breakdown_data" };
 
+    const currency = reportCurrency(audit, platform);
     const totals = accountTotals(audit);
     const baseCpa = computeBaselineCpa({
       spend: totals.spend,
       conversions: totals.conversions,
     });
-    const dimensions = dims.map((d) =>
-      analyzeDimension({ dimension: d, records: byDimension[d], baselineCpa: baseCpa })
-    );
+    const decorateSegment = (segment) => ({
+      ...segment,
+      currency,
+      spendFormatted: formatMoney(segment.spend, currency),
+      cpaFormatted: segment.cpa != null ? formatMoney(segment.cpa, currency) : null,
+      baselineCpaFormatted:
+        segment.baselineCpa != null ? formatMoney(segment.baselineCpa, currency) : null,
+      wastedSpendFormatted: formatMoney(segment.wastedSpend, currency),
+    });
+    const dimensions = dims.map((d) => {
+      const analysis = analyzeDimension({
+        dimension: d,
+        records: byDimension[d],
+        baselineCpa: baseCpa,
+      });
+      return {
+        ...analysis,
+        currency,
+        baselineCpaFormatted:
+          analysis.baselineCpa != null ? formatMoney(analysis.baselineCpa, currency) : null,
+        totalWasteFormatted: formatMoney(analysis.totalWaste, currency),
+        segments: analysis.segments.map(decorateSegment),
+        worst: analysis.worst ? decorateSegment(analysis.worst) : null,
+      };
+    });
     // Headline = dimension carrying the most confident wasted spend.
     const headline = [...dimensions].sort((a, b) => b.totalWaste - a.totalWaste)[0];
-    return { available: true, baselineCpa: baseCpa, dimensions, headline };
+    return {
+      available: true,
+      currency,
+      baselineCpa: baseCpa,
+      baselineCpaFormatted: baseCpa != null ? formatMoney(baseCpa, currency) : null,
+      dimensions,
+      headline,
+    };
+  };
+
+  /**
+   * Break spend / impressions / conversions down by campaign type (Search,
+   * Performance Max, Display, Shopping, Demand Gen, Video, ...). Resolves WHERE
+   * spend and results actually come from — e.g. when active keywords show ~0
+   * impressions yet the account spends and converts (the answer is usually PMax
+   * or Display). Reads the already-pulled campaign records; no extra data needed.
+   */
+  const analyzeCampaignTypes = () => {
+    const platform = primaryPlatform(audit);
+    const pd = platformData(audit, platform);
+    const campaigns = pd?.byLevel?.campaign || [];
+    if (!campaigns.length) return { available: false, reason: "no_campaign_data" };
+
+    const currency = reportCurrency(audit, platform);
+    const round = (n, dp = 2) => Math.round(n * 10 ** dp) / 10 ** dp;
+    const byType = {};
+    for (const c of campaigns) {
+      const type = c.objective || c.advertisingChannelType || c.type || c.campaignType || "UNKNOWN";
+      const t = (byType[type] ||= {
+        channelType: type,
+        spend: 0,
+        impressions: 0,
+        clicks: 0,
+        conversions: 0,
+        campaignCount: 0,
+      });
+      t.spend += num(c.spend);
+      t.impressions += num(c.impressions);
+      t.clicks += num(c.clicks);
+      t.conversions += num(c.results ?? c.conversions);
+      t.campaignCount += 1;
+    }
+
+    const totalSpend = Object.values(byType).reduce((s, t) => s + t.spend, 0);
+    const totalConversions = Object.values(byType).reduce((s, t) => s + t.conversions, 0);
+    const types = Object.values(byType)
+      .map((t) => ({
+        channelType: t.channelType,
+        campaignCount: t.campaignCount,
+        spend: round(t.spend),
+        spendFormatted: formatMoney(t.spend, currency),
+        impressions: t.impressions,
+        clicks: t.clicks,
+        conversions: t.conversions,
+        cpa: t.conversions > 0 ? round(t.spend / t.conversions) : null,
+        cpaFormatted:
+          t.conversions > 0 ? formatMoney(t.spend / t.conversions, currency) : null,
+        spendSharePct: totalSpend > 0 ? round((t.spend / totalSpend) * 100, 1) : 0,
+        conversionSharePct:
+          totalConversions > 0 ? round((t.conversions / totalConversions) * 100, 1) : 0,
+      }))
+      .sort((a, b) => b.spend - a.spend);
+
+    const keywords = pd?.byLevel?.keyword || [];
+    const activeKeywords = keywords.filter((kw) => {
+      const status = String(kw.status || "").toLowerCase();
+      return !status.includes("paused") && !status.includes("removed");
+    });
+    const zeroImpressionKeywords = activeKeywords.filter(
+      (kw) => num(kw.impressions) === 0 && num(kw.spend) === 0
+    );
+    const zeroImpressionSharePct =
+      activeKeywords.length > 0
+        ? round((zeroImpressionKeywords.length / activeKeywords.length) * 100, 1)
+        : null;
+    const topSpendType = types[0] || null;
+    const keywordCoverage = {
+      available: activeKeywords.length > 0,
+      activeKeywordsTotal: activeKeywords.length,
+      zeroImpressionKeywords: zeroImpressionKeywords.length,
+      zeroImpressionSharePct,
+    };
+    const deadKeywordSignal =
+      activeKeywords.length > 0 &&
+      zeroImpressionSharePct >= 80 &&
+      totalSpend > 0 &&
+      topSpendType
+        ? {
+            available: true,
+            zeroImpressionKeywords: zeroImpressionKeywords.length,
+            activeKeywordsTotal: activeKeywords.length,
+            zeroImpressionSharePct,
+            topSpendChannelType: topSpendType.channelType,
+            topSpendSharePct: topSpendType.spendSharePct,
+            topSpend: topSpendType.spend,
+            topSpendFormatted: topSpendType.spendFormatted,
+            note:
+              "Most active keywords show zero impressions while campaign-level spend exists; the account's traffic is coming from campaign types, not the keyword set.",
+          }
+        : {
+            available: false,
+            reason:
+              activeKeywords.length === 0
+                ? "no_keyword_data"
+                : "active_keywords_have_delivery_or_no_campaign_spend",
+          };
+
+    return {
+      available: true,
+      currency,
+      totalSpend: round(totalSpend),
+      totalSpendFormatted: formatMoney(totalSpend, currency),
+      totalConversions,
+      types,
+      keywordCoverage,
+      deadKeywordSignal,
+    };
   };
 
   const checkSignificance = ({ metric, denominator } = {}) =>
@@ -232,6 +418,7 @@ export const createDeepAuditTools = ({ audit, priorAudits = [] } = {}) => {
     getEvidencePacket,
     decomposeKpi,
     analyzeSegments,
+    analyzeCampaignTypes,
     checkSignificance,
     getPeerComparison,
     getMemoryDelta,
@@ -270,6 +457,12 @@ export const TOOL_SCHEMAS = [
       properties: { dimension: { type: "string" } },
       additionalProperties: false,
     },
+  },
+  {
+    name: "analyzeCampaignTypes",
+    description:
+      "Break spend, impressions, and conversions down by campaign type (Search, Performance Max, Display, Shopping, Demand Gen, Video). Use to resolve WHERE spend and results actually come from — especially when active keywords show ~0 impressions but the account still spends and converts.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "checkSignificance",

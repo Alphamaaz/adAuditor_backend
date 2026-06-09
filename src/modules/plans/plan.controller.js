@@ -133,10 +133,12 @@ export const getMyPlanAndUsage = async (req, res) => {
     subscription
   );
 
-  const monthlyAuditLimit =
-    plan?.monthlyAuditLimit ?? FREE_PLAN_FALLBACK.monthlyAuditLimit;
-  const platformLimit =
-    plan?.platformLimit ?? FREE_PLAN_FALLBACK.platformLimit;
+  const monthlyAuditLimit = plan
+    ? plan.monthlyAuditLimit
+    : FREE_PLAN_FALLBACK.monthlyAuditLimit;
+  const platformLimit = plan
+    ? plan.platformLimit
+    : FREE_PLAN_FALLBACK.platformLimit;
   const aiNarrative = getAiNarrativeMode(plan);
 
   res.json({

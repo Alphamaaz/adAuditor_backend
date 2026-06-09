@@ -52,8 +52,9 @@ export const enforcePlatformLimit = asyncHandler(async (req, _res, next) => {
     ? [...new Set(req.body.selectedPlatforms)]
     : [];
 
-  const limit =
-    req.effectivePlan?.platformLimit ?? FREE_PLAN_FALLBACK.platformLimit;
+  const limit = req.effectivePlan
+    ? req.effectivePlan.platformLimit
+    : FREE_PLAN_FALLBACK.platformLimit;
 
   if (limit != null && requested.length > limit) {
     throw paymentRequired(
@@ -76,9 +77,9 @@ export const enforcePlatformLimit = asyncHandler(async (req, _res, next) => {
  */
 export const enforceMonthlyAuditLimit = asyncHandler(
   async (req, _res, next) => {
-    const limit =
-      req.effectivePlan?.monthlyAuditLimit ??
-      FREE_PLAN_FALLBACK.monthlyAuditLimit;
+    const limit = req.effectivePlan
+      ? req.effectivePlan.monthlyAuditLimit
+      : FREE_PLAN_FALLBACK.monthlyAuditLimit;
 
     if (limit == null) {
       return next(); // unlimited
@@ -188,8 +189,9 @@ export const enforceAiCostCap = asyncHandler(async (req, _res, next) => {
  */
 export const enforceStorageCap = asyncHandler(async (req, _res, next) => {
   const organizationId = getOrganizationId(req);
-  const capMb =
-    req.effectivePlan?.storageMbCap ?? FREE_PLAN_FALLBACK.storageMbCap;
+  const capMb = req.effectivePlan
+    ? req.effectivePlan.storageMbCap
+    : FREE_PLAN_FALLBACK.storageMbCap;
   if (capMb == null) return next(); // unlimited
 
   const usedBytes = await sumOrgStorageBytes({ organizationId });

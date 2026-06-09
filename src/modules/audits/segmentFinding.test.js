@@ -40,6 +40,37 @@ const auditWithSegments = () => ({
   },
 });
 
+const auditWithTuesdayWaste = () => ({
+  id: "aud_day",
+  selectedPlatforms: ["GOOGLE"],
+  dataSource: "OAUTH",
+  businessProfileSnapshot: { sectionA: { businessType: "eCommerce" } },
+  intakeResponses: [{ section: "PLATFORM_GOOGLE", answers: {} }],
+  uploadReadiness: { mode: "FULL" },
+  normalizedDataset: {
+    summary: {
+      totals: { spend: 43470, conversions: 270 },
+      platforms: {
+        GOOGLE: { spend: 43470, conversions: 270, clicks: 3000, impressions: 100000, currency: "PKR" },
+      },
+    },
+    data: {
+      platforms: {
+        GOOGLE: {
+          records: [{ level: "campaign", name: "C1", spend: 43470 }],
+          byLevel: { campaign: [{ level: "campaign", name: "C1", spend: 43470, conversions: 270 }] },
+          byDimension: {
+            day_of_week: [
+              { dimension: "day_of_week", segment: "TUESDAY", spend: 7103, clicks: 500, conversions: 27 },
+            ],
+          },
+          byDay: [],
+        },
+      },
+    },
+  },
+});
+
 describe("SEG-WASTE-001 (production engine)", () => {
   it("fires for the wasteful age segment with rich evidence", () => {
     const { findings } = runDeterministicAudit(auditWithSegments());
@@ -52,6 +83,21 @@ describe("SEG-WASTE-001 (production engine)", () => {
     expect(seg.evidence.segmentCpa).toBeNull(); // zero conversions
     expect(seg.evidence.baselineCpa).toBeGreaterThan(0);
     expect(seg.evidence.reason).toBe("zero_conversions");
+    expect(seg.title).toContain("PKR 206");
+    expect(seg.estimatedImpact).toContain("PKR 206");
+    expect(seg.evidence.currency).toBe("PKR");
+    expect(seg.evidence.estimatedWasteFormatted).toBe("PKR 206");
+    expect(seg.evidence.baselineCpaFormatted).toMatch(/^PKR /);
+  });
+
+  it("formats large PKR segment amounts without truncating digits", () => {
+    const { findings } = runDeterministicAudit(auditWithTuesdayWaste());
+    const seg = findings.find((f) => f.ruleId === "SEG-WASTE-001");
+    expect(seg).toBeDefined();
+    expect(seg.evidence.dimension).toBe("day_of_week");
+    expect(seg.evidence.spendFormatted).toBe("PKR 7,103");
+    expect(JSON.stringify(seg)).not.toContain("PKR 7,03");
+    expect(seg.fixSteps.join(" ")).not.toContain("7-day window");
   });
 
   it("does NOT fire when there is no byDimension data (CSV-only safety)", () => {
@@ -67,6 +113,7 @@ describe("SEG-WASTE-001 (production engine)", () => {
     const packet = buildEvidencePacket({ ...audit, ruleFindings: findings });
     const segInPacket = packet.topFindings.find((f) => f.ruleId === "SEG-WASTE-001");
     expect(segInPacket).toBeDefined();
+    expect(segInPacket.estimatedImpactDollars).toBe(206);
     expect(packet.verifiedNumbers).toContain(206);
   });
 });

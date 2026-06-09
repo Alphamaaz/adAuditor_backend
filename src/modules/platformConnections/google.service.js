@@ -377,6 +377,39 @@ export const fetchDailySegments = async (accessToken, customerId, dateRange = "L
 };
 
 /**
+ * Fetch account-level segment breakdowns (device, day-of-week, ad network).
+ * Each is an independent GAQL query FROM customer, so metrics aggregate at the
+ * account level — one row per segment value. Powers per-segment waste analysis
+ * (analyzeSegments + SEG-WASTE-001). Best-effort per dimension.
+ */
+export const fetchSegmentBreakdowns = async (
+  accessToken,
+  customerId,
+  dateRange = "LAST_30_DAYS",
+  loginCustomerId = null
+) => {
+  const metrics =
+    "metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value";
+  const dimensions = [
+    { key: "device", field: "segments.device" },
+    { key: "dayOfWeek", field: "segments.day_of_week" },
+    { key: "network", field: "segments.ad_network_type" },
+  ];
+  const out = {};
+  for (const { key, field } of dimensions) {
+    try {
+      const query = `SELECT ${field}, ${metrics} FROM customer WHERE ${dateFilter(dateRange)}`;
+      out[key] = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+      console.log(`[Google Ads] ✓ Fetched ${out[key].length} '${key}' segment row(s).`);
+    } catch (err) {
+      console.warn(`[Google Ads] segment breakdown '${key}' unavailable: ${err.message}`);
+      out[key] = [];
+    }
+  }
+  return out;
+};
+
+/**
  * Fetch negative keyword shared lists.
  * member_count and reference_count give the rule engine coverage signals for KW-002.
  */
