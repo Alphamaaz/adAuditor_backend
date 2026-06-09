@@ -293,6 +293,31 @@ const normalizeReportOutput = (output, context) => {
     report.benchmarkComparisons = comparisons.slice(0, 6);
   }
 
+  // Sanitize sub-arrays within each item — the AI can return valid top-level
+  // arrays but with individual items missing required sub-fields, which causes
+  // .map() crashes in the frontend.
+  if (Array.isArray(report.clientReadyRecommendations)) {
+    report.clientReadyRecommendations = report.clientReadyRecommendations.map((r) => ({
+      ...r,
+      nextSteps: Array.isArray(r?.nextSteps) ? r.nextSteps : [],
+      sourceRuleIds: Array.isArray(r?.sourceRuleIds) ? r.sourceRuleIds : [],
+    }));
+  }
+  if (Array.isArray(report.findingAnalyses)) {
+    report.findingAnalyses = report.findingAnalyses.map((r) => ({
+      ...r,
+      evidence: Array.isArray(r?.evidence) ? r.evidence : [],
+      recommendedActions: Array.isArray(r?.recommendedActions) ? r.recommendedActions : [],
+    }));
+  }
+  if (Array.isArray(report.hypothesisAnalyses)) {
+    report.hypothesisAnalyses = report.hypothesisAnalyses.map((r) => ({
+      ...r,
+      testsRun: Array.isArray(r?.testsRun) ? r.testsRun : [],
+      sourceRuleIds: Array.isArray(r?.sourceRuleIds) ? r.sourceRuleIds : [],
+    }));
+  }
+
   report.auditNarrativeVersion ||= "v3-deep-default";
   report.segmentInsights ||= [];
   report.comparisonInsights ||= [];

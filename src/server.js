@@ -24,10 +24,13 @@ const validateBootConfig = () => {
     );
   }
 
-  // Production: refuse to start with obvious misconfig.
+  // Production: warn about missing optional services (non-fatal until configured).
   if (isProd) {
     if (!process.env.STRIPE_SECRET_KEY) {
-      errors.push("STRIPE_SECRET_KEY is required in production");
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[boot] STRIPE_SECRET_KEY is not set. Billing features will be unavailable."
+      );
     }
     if (!process.env.SENTRY_DSN) {
       // eslint-disable-next-line no-console

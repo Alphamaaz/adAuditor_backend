@@ -2,7 +2,7 @@ services:
   # 1. Frontend (Next.js) - Mapping to 3050
   frontend:
     build:
-      context: ../ad-auditor-frontend
+      context: ../adAuditor_frontend
       dockerfile: Dockerfile
       args:
         - NEXT_PUBLIC_API_URL=https://api.adadviser.uk
