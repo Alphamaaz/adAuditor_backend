@@ -461,6 +461,7 @@ export const fetchTikTokDataForAudit = async (req, res) => {
       auditId,
       platform: "TIKTOK",
       advertiserId,
+      currency,
       summary: summaryOut,
       message: "TikTok Ads data fetched and normalized. You can now run the audit.",
     },
@@ -562,6 +563,20 @@ export const fetchMetaDataForAudit = async (req, res) => {
   const adAccountId = externalAdAccountId.startsWith("act_")
     ? externalAdAccountId
     : `act_${externalAdAccountId}`;
+  const plainAdAccountId = adAccountId.replace(/^act_/, "");
+
+  let currency = null;
+  try {
+    const adAccounts = await fetchAdAccounts(accessToken);
+    const selectedAccount = adAccounts.find(
+      (account) =>
+        String(account.id) === adAccountId ||
+        String(account.account_id) === plainAdAccountId
+    );
+    currency = selectedAccount?.currency || null;
+  } catch {
+    currency = null;
+  }
 
   // Fetch insights + structure data in parallel
   const [
@@ -633,7 +648,7 @@ export const fetchMetaDataForAudit = async (req, res) => {
     campaignRecords: campaigns,
     adSetRecords: adSets,
     adRecords: ads,
-    currency: null, // fetched per-account below if needed
+    currency,
     byDimension,
     byDay,
   });
@@ -674,6 +689,7 @@ export const fetchMetaDataForAudit = async (req, res) => {
         metadata: {
           externalAdAccountId,
           lastFetchedAt: new Date().toISOString(),
+          currency,
         },
       },
     });
@@ -686,6 +702,7 @@ export const fetchMetaDataForAudit = async (req, res) => {
         metadata: {
           platform: "META",
           externalAdAccountId,
+          currency,
           summary: normalizedDataset.summary,
         },
       },
@@ -697,6 +714,7 @@ export const fetchMetaDataForAudit = async (req, res) => {
     data: {
       auditId,
       platform: "META",
+      currency,
       summary: normalizedDataset.summary.platforms?.META || {},
       message: "Meta data fetched and normalized. You can now run the audit.",
     },
@@ -1151,6 +1169,7 @@ export const fetchGoogleDataForAudit = async (req, res) => {
       auditId,
       platform: "GOOGLE",
       customerId,
+      currency,
       summary: summaryOut,
       message: "Google Ads data fetched and normalized. You can now run the audit.",
     },

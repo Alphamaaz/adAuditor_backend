@@ -1,5 +1,6 @@
 import { serviceUnavailable } from "../../utils/appError.js";
 import { aiReportJsonSchema } from "./aiReport.schema.js";
+import { buildReportDocumentFromAudit } from "./reportDocument.service.js";
 import { recordAiUsage } from "./aiUsage.service.js";
 import { redactContext } from "./piiRedaction.service.js";
 
@@ -34,6 +35,24 @@ const extractTokens = ({ provider, responseBody }) => {
     };
   }
   return { inputTokens: 0, outputTokens: 0 };
+};
+
+// Resolve the account's real currency from the normalized dataset (mirrors
+// getReportCurrency in auditEngine.service.js) so AI-written narrative text
+// matches the currency already used in deterministic rule findings.
+const getContextCurrency = (context) => {
+  const platforms = context?.normalizedSummary?.platforms || {};
+  for (const key of Object.keys(platforms)) {
+    if (platforms[key]?.currency) return platforms[key].currency;
+  }
+  return context?.normalizedSummary?.totals?.currency || "USD";
+};
+
+const formatCurrencyAmount = (value, currency) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const formatted = Math.round(n).toLocaleString("en-US");
+  return `${String(currency || "USD").toUpperCase()} ${formatted}`;
 };
 
 const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions";
@@ -203,7 +222,9 @@ const normalizeReportOutput = (output, context) => {
       platform: finding.platform ?? null,
       severity: finding.severity,
       title: finding.title,
-      estimatedImpact: finding.estimatedImpact || "Impact not quantified from available data.",
+      estimatedImpact:
+        finding.estimatedImpact ||
+        "Business risk identified; the available data does not support a reliable money estimate.",
       recommendedAction: Array.isArray(finding.fixSteps) && finding.fixSteps.length
         ? finding.fixSteps[0]
         : "Address this finding first because it is among the highest-impact verified issues.",
@@ -242,10 +263,12 @@ const normalizeReportOutput = (output, context) => {
       title: finding.title,
       whatIsHappening: finding.detail || finding.title,
       whyItIsHappening: finding.evidence?.reason
-        ? `The deterministic evidence flags the driver as ${String(finding.evidence.reason).replace(/_/g, " ")}.`
-        : deep?.report?.rootCause || "The rule evidence points to an efficiency or tracking constraint in this part of the account.",
+        ? `The account data points to ${String(finding.evidence.reason).replace(/_/g, " ")} as the driver.`
+        : deep?.report?.rootCause || "The evidence points to an efficiency or tracking constraint in this part of the account.",
       evidence: evidenceBulletsFromFinding(finding),
-      estimatedBusinessImpact: finding.estimatedImpact || "Impact not quantified from available data.",
+      estimatedBusinessImpact:
+        finding.estimatedImpact ||
+        "Business risk identified; the available data does not support a reliable money estimate.",
       confidence: confidenceFromFinding(finding),
       easeOfImplementation: easeFromFinding(finding),
       recommendedActions: Array.isArray(finding.fixSteps) && finding.fixSteps.length
@@ -262,7 +285,7 @@ const normalizeReportOutput = (output, context) => {
         hypothesis: deep?.report?.headline || primary?.title || "The largest verified finding is the primary performance bottleneck.",
         testsRun: deep?.reasoningTrace?.length
           ? deep.reasoningTrace.map((step) => `Ran ${step.tool}${step.phase ? ` (${step.phase})` : ""}`).slice(0, 6)
-          : ["Ranked deterministic findings by impact", "Checked data confidence", "Reviewed benchmark, peer, and historical evidence where available"],
+          : ["Ranked verified findings by impact", "Checked data confidence", "Reviewed benchmark, peer, and historical evidence where available"],
         conclusion: deep?.report?.rootCause || primary?.detail || "The evidence supports prioritizing the largest verified finding first.",
         confidence: deep?.report?.confidence || (primary ? confidenceFromFinding(primary) : "medium"),
         sourceRuleIds: primary ? [primary.ruleId] : [],
@@ -337,23 +360,41 @@ const normalizeReportOutput = (output, context) => {
       : ["No major issues were found in the available data.", "Review data coverage before making large budget decisions."];
   }
 
+  if (!report.premiumReport) {
+    report.premiumReport = buildReportDocumentFromAudit({
+      ...(context?.audit || {}),
+      normalizedDataset: {
+        summary: context?.normalizedSummary || {},
+        data: {},
+      },
+      ruleFindings: context?.evidencePacket?.topFindings?.length
+        ? context.evidencePacket.topFindings
+        : context?.ruleFindings || [],
+      aiReport: {
+        output: report,
+      },
+      completedAt: context?.audit?.completedAt || null,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
   return report;
 };
 
 // ── Prompt builders ───────────────────────────────────────────────────────────
 
 const buildSystemPrompt = () =>
-  `You are a senior paid media strategist and audit writer at Ad Adviser, a professional advertising account audit service. You have personally audited hundreds of ad accounts spending $5,000 to $10,000,000 per month across Meta, Google Ads, and TikTok for over a decade.
+  `You are a senior paid media strategist and audit writer at Ad Adviser, a professional advertising account audit service. You have personally audited hundreds of ad accounts across Meta, Google Ads, and TikTok for over a decade.
 
-Clients pay for your audit reports because you tell them exactly what is costing them money — with specific dollar amounts — and exactly what to do about it, ranked by financial impact. Your reports are never generic. Every sentence is grounded in the client's actual data.
+Clients pay for your audit reports because you tell them exactly what is costing them money, using the account's real currency, and exactly what to do about it, ranked by financial impact. Your reports are never generic. Every sentence is grounded in the client's actual data.
 
 WRITING RULES — follow these without exception:
 
-1. DOLLAR SPECIFICITY: Every problem you describe MUST include the specific dollar amount, percentage, or metric from ruleFindings evidence or normalizedSummary. Never write about a performance issue without its dollar cost. "Your campaigns wasted $4,280" beats "spend efficiency is suboptimal" every time.
+1. CURRENCY SPECIFICITY: Every problem you describe MUST include the specific account-currency amount, percentage, or metric from ruleFindings evidence or normalizedSummary. Never write about a performance issue without its verified cost. "Your campaigns wasted the verified account-currency amount" beats "spend efficiency is suboptimal" every time.
 
-2. GOAL-REFERENCED FRAMING: Always compare performance against the client's declared goals in businessProfileSnapshot.sectionA. If targetCpa is $50 and actual CPA is $148, write "$148 actual CPA — 3× your $50 target." If targetRoas is 4.0 and estimated ROAS is 1.2, write "1.2× estimated ROAS against your 4.0× target — you are getting back $0.30 for every $1 spent." Never describe underperformance without anchoring it to their declared goal.
+2. GOAL-REFERENCED FRAMING: Always compare performance against the client's declared goals in businessProfileSnapshot.sectionA. If target CPA exists, state the actual CPA and target CPA using the account currency code. If targetRoas is 4.0 and estimated ROAS is 1.2, write "1.2x estimated ROAS against your 4.0x target." Never describe underperformance without anchoring it to their declared goal.
 
-3. IMPACT RANKING: Rank all priorities strictly by estimated dollar waste or revenue impact, not by severity label alone. A $12,000/month waste issue at MEDIUM severity must be ranked above a $150/month issue at CRITICAL. Always explain why a finding is the top priority in dollar terms.
+3. IMPACT RANKING: Rank all priorities strictly by estimated currency waste or revenue impact, not by severity label alone. A large recoverable-spend issue at MEDIUM severity must be ranked above a small issue at CRITICAL. Always explain why a finding is the top priority in financial terms.
 
 4. EXPERT TONE: Write for a sophisticated advertiser who manages their own agency or in-house media team. Skip beginner-level explanations. Go straight to the diagnosis, the mechanism, and the action. Use the language of paid media professionals: "ad set learning phase", "broad match bleed", "pixel event mismatch", "CAPI signal loss", "search term irrelevance waste" — not "your ads may not be optimized."
 
@@ -363,13 +404,13 @@ WRITING RULES — follow these without exception:
 
 7. TRACKING AWARENESS: If tracking issues exist (findings BP-TRK-001, BP-TRK-002, BP-TRK-003, or BP-TRK-004), state immediately that all CPA and ROAS figures in this audit are unreliable until these are resolved. Don't analyze ROAS data as if it's trustworthy when the underlying tracking is broken.
 
-8. NO INVENTION: Never invent campaign names, dollar figures, CPAs, ROASes, CTRs, conversion counts, dates, or any metrics. Use ONLY what appears in the supplied audit context JSON. If a metric is not in the context, do not mention it.
+8. NO INVENTION: Never invent campaign names, money figures, CPAs, ROASes, CTRs, conversion counts, dates, or any metrics. Use ONLY what appears in the supplied audit context JSON. If a metric is not in the context, do not mention it.
 
-9. PRIOR AUDIT CONTEXT: If priorAudits contains data, reference it explicitly using only the exact prior/current values already present in evidencePacket.comparison.selfOverTime. If those exact values are absent, describe the change without dollar amounts. Trend context is highly valuable to the client.
+9. PRIOR AUDIT CONTEXT: If priorAudits contains data, reference it explicitly using only the exact prior/current values already present in evidencePacket.comparison.selfOverTime. If those exact values are absent, describe the change without money amounts. Trend context is highly valuable to the client.
 
-10. EVIDENCE PACKET IS THE SOURCE OF TRUTH: The supplied context contains an "evidencePacket" object built by deterministic code. It is the authoritative source. Every dollar figure you cite MUST already appear in evidencePacket (in a finding's evidence/estimatedImpact, in evidencePacket.verifiedNumbers, or in evidencePacket.comparison). You must NOT compute, derive, sum, or estimate any new dollar amount, percentage, CPA, ROAS, or count. If a number is not in the packet, do not state it. The deterministic code has already done all arithmetic — your job is to explain and prioritize, never to calculate.
+10. EVIDENCE PACKET IS THE SOURCE OF TRUTH: The supplied context contains an "evidencePacket" object built by deterministic code. It is the authoritative source. Every money figure you cite MUST already appear in evidencePacket (in a finding's evidence/estimatedImpact, in evidencePacket.verifiedNumbers, or in evidencePacket.comparison). You must NOT compute, derive, sum, or estimate any new money amount, percentage, CPA, ROAS, or count. If a number is not in the packet, do not state it. The deterministic code has already done all arithmetic — your job is to explain and prioritize, never to calculate.
 
-11. PRIORITY ORDER: Rank and lead with findings in this order: (a) highest verified dollar impact (evidencePacket.topFindings are pre-sorted by estimatedImpactDollars — respect that order), (b) tracking/data-reliability issues (evidencePacket.dataConfidence), (c) segment-waste findings (SEG-WASTE-*), (d) peer-comparison gaps (evidencePacket.comparison.peer), (e) memory regression/improvement (evidencePacket.comparison.selfOverTime).`;
+11. PRIORITY ORDER: Rank and lead with findings in this order: (a) highest verified financial impact (evidencePacket.topFindings are pre-sorted by estimatedImpactDollars — respect that order), (b) tracking/data-reliability issues (evidencePacket.dataConfidence), (c) segment-waste findings (SEG-WASTE-*), (d) peer-comparison gaps (evidencePacket.comparison.peer), (e) memory regression/improvement (evidencePacket.comparison.selfOverTime).`;
 
 const DEEP_REPORTING_RULES = `DEFAULT DEEP AUDIT REQUIREMENTS:
 - Treat this as the main client-facing audit, not a short rule summary.
@@ -377,7 +418,11 @@ const DEEP_REPORTING_RULES = `DEFAULT DEEP AUDIT REQUIREMENTS:
 - For major performance findings, investigate root causes. If high CPA is present, discuss the diagnostic path using only supplied facts: CPM, CTR, conversion rate, peers, benchmarks, segment waste, campaign type, and tracking reliability.
 - Every major finding must include what is happening, why it is happening, evidence, estimated business impact, confidence, recommended actions, and expected outcome after fixing.
 - If auditFocus is supplied, use it only to guide prioritization and wording. Still audit the whole account and surface hidden issues outside that focus.
-- Rank findings by estimated recoverable spend/revenue first, confidence second, and ease of implementation third.`;
+- Rank findings by estimated recoverable spend/revenue first, confidence second, and ease of implementation third.
+- Report tables are for short data only. Never put prose in a table cell. Evidence values must be short numeric/single-token values, not full sentences.
+- Do not request a bar chart with fewer than 3 rows. Use a gauge or short evidence table instead. Two-row comparison charts are allowed only for explicit A vs B comparisons.
+- Confidence and ease are finding metadata, not callouts. Callouts are only for genuine warnings or wins.
+- Each major finding should include one final "What this means for you" sentence, max 30 words, no jargon.`;
 
 const buildUserPrompt = (context) => {
   const bp = context?.audit?.businessProfileSnapshot?.sectionA || {};
@@ -398,18 +443,19 @@ const buildUserPrompt = (context) => {
         intakeResponses: undefined,
       }
     : null;
-  const allowedDollarAmounts = (context?.evidencePacket?.verifiedNumbers || [])
-    .map((n) => `$${Number(n).toLocaleString()}`)
+  const currency = getContextCurrency(context);
+  const allowedMoneyAmounts = (context?.evidencePacket?.verifiedNumbers || [])
+    .map((n) => formatCurrencyAmount(n, currency))
     .join(", ");
 
   const contextHints = [
-    bp.targetCpa ? `• Declared target CPA: $${bp.targetCpa}` : "• Target CPA: not declared (use industry benchmarks)",
+    bp.targetCpa ? `• Declared target CPA: ${formatCurrencyAmount(bp.targetCpa, currency)}` : "• Target CPA: not declared (use industry benchmarks)",
     bp.targetRoas ? `• Declared target ROAS: ${bp.targetRoas}×` : "• Target ROAS: not declared",
-    bp.monthlyBudget ? `• Declared monthly budget: $${bp.monthlyBudget.toLocaleString()}` : "• Monthly budget: not declared",
+    bp.monthlyBudget ? `• Declared monthly budget: ${formatCurrencyAmount(bp.monthlyBudget, currency)}` : "• Monthly budget: not declared",
     bp.businessType ? `• Business type: ${bp.businessType}` : "• Business type: not declared",
-    bp.avgOrderValue ? `• Avg order value: $${bp.avgOrderValue}` : null,
-    bp.blendedCac ? `• Blended CAC: $${bp.blendedCac}` : null,
-    totals.spend ? `• Total spend in audit data: $${Math.round(totals.spend).toLocaleString()}` : null,
+    bp.avgOrderValue ? `• Avg order value: ${formatCurrencyAmount(bp.avgOrderValue, currency)}` : null,
+    bp.blendedCac ? `• Blended CAC: ${formatCurrencyAmount(bp.blendedCac, currency)}` : null,
+    totals.spend ? `• Total spend in audit data: ${formatCurrencyAmount(totals.spend, currency)}` : null,
     `• Overall health score: ${healthScore}/100`,
     `• Platforms audited: ${platforms}`,
     hasPriorAudits ? `• Prior audit data available: YES — reference trends explicitly` : "• Prior audit data: none",
@@ -427,7 +473,7 @@ const buildUserPrompt = (context) => {
         recommendations: deepAudit.report.recommendations,
         toolsRun: (deepAudit.reasoningTrace || []).map((step) => step.tool),
       })
-    : "No separate Deep Audit loop result was available; use the evidence packet and deterministic findings.";
+    : "No separate Deep Audit loop result was available; use the evidence packet and verified findings.";
 
   return `Write the AI narrative for this paid advertising audit. Return ONLY valid JSON — no markdown, no preamble, no explanation outside the JSON.
 
@@ -452,7 +498,7 @@ REQUIRED JSON OUTPUT:
       "platform": "META|GOOGLE|TIKTOK",
       "severity": "CRITICAL|HIGH|MEDIUM|LOW",
       "title": "concise title",
-      "estimatedImpact": "must quote the specific dollar figure from that finding's evidence",
+      "estimatedImpact": "must quote the specific account-currency figure from that finding's evidence",
       "recommendedAction": "one specific instruction, starts with a verb"
     }
   ],
@@ -475,7 +521,7 @@ REQUIRED JSON OUTPUT:
   ],
   "auditNarrativeVersion": "v3-deep-default",
   "dataConfidenceSummary": "one sentence on data reliability from evidencePacket.dataConfidence (or null)",
-  "segmentInsights": ["segment-level facts from SEG-WASTE-* findings, with the exact segment + dollar from evidence"],
+  "segmentInsights": ["segment-level facts from SEG-WASTE-* findings, with the exact segment + account-currency amount from evidence"],
   "comparisonInsights": ["facts from evidencePacket.comparison.peer — name the peer account + the exact metric gap"],
   "memoryInsights": ["facts from evidencePacket.comparison.selfOverTime — quote the exact delta vs the prior audit date"],
   "risksAndAssumptions": ["any caveat: limited sample, missing targets, tracking unreliability — drawn from evidence sampleNote/confidence fields"]
@@ -490,19 +536,20 @@ ADDITIONAL REQUIRED DEEP FIELDS:
 SECTION-BY-SECTION INSTRUCTIONS:
 
 STRICT FACT CHECK BEFORE YOU RETURN:
-• Allowed dollar amounts for this response are ONLY: ${allowedDollarAmounts || "none"}.
-• Before returning JSON, scan every field you wrote. If any "$" amount is not exactly in that allowed list, remove it or replace it with a non-dollar phrase.
-• Do not write illustrative examples with dollar amounts.
-• Do not write "recovery", "savings", "overage", "per conversion", or "budget at risk" dollar estimates unless that exact dollar amount appears in the allowed list.
+• This account's currency is ${currency}. Every monetary figure you write MUST be formatted as "${currency} <amount>" (e.g. "${formatCurrencyAmount(1000, currency)}"). Never use "$"; use the 3-letter currency code everywhere, including USD.
+• Allowed monetary amounts for this response are ONLY: ${allowedMoneyAmounts || "none"}.
+• Before returning JSON, scan every field you wrote. If any monetary amount is not exactly in that allowed list, remove it or replace it with a non-monetary phrase.
+• Do not write illustrative examples with monetary amounts.
+• Do not write "recovery", "savings", "overage", "per conversion", or "budget at risk" monetary estimates unless that exact amount appears in the allowed list.
 • Do not calculate CPA, CPC, CPM, ROAS, budget, recovery, or percentage deltas from spend/click/conversion totals. Only repeat values already present in the evidence packet.
 
 executiveSummary (2 required, 3rd optional):
-• Para 1: Lead with the health score and what it signals. Quote the total spend reviewed ($${Math.round(totals.spend || 0).toLocaleString()}). Name the single most expensive problem with its exact dollar waste from the findings — do not bury the lead.
-• Para 2: Connect performance to declared goals only when those exact goal values appear in the evidence packet. If BP-PERF-001 exists in ruleFindings, state the CPA gap only using evidence values. If BP-PERF-002 exists, state the ROAS shortfall only using evidence values. If any BP-TRK findings exist, warn that data reliability is compromised and CPA/ROAS figures cannot be fully trusted until tracking is fixed.${hasPriorAudits ? "\n• Para 3: Reference prior audit data to show whether performance is improving or deteriorating. Quote only the exact metric change already present in evidencePacket.comparison.selfOverTime." : "\n• Para 3 (optional): Prognosis — describe the expected operational improvement without adding any new dollar amount."}
+• Para 1: Lead with the health score and what it signals. Quote the total spend reviewed (${formatCurrencyAmount(totals.spend || 0, currency)}). Name the single most expensive problem with its exact monetary waste from the findings — do not bury the lead.
+• Para 2: Connect performance to declared goals only when those exact goal values appear in the evidence packet. If BP-PERF-001 exists in ruleFindings, state the CPA gap only using evidence values. If BP-PERF-002 exists, state the ROAS shortfall only using evidence values. If any BP-TRK findings exist, warn that data reliability is compromised and CPA/ROAS figures cannot be fully trusted until tracking is fixed.${hasPriorAudits ? "\n• Para 3: Reference prior audit data to show whether performance is improving or deteriorating. Quote only the exact metric change already present in evidencePacket.comparison.selfOverTime." : "\n• Para 3 (optional): Prognosis — describe the expected operational improvement without adding any new money amount."}
 
-topPriorities (max 5, ranked by dollar impact, not severity label):
+topPriorities (max 5, ranked by financial impact, not severity label):
 • Only ruleIds that appear in ruleFindings
-• estimatedImpact: copy the dollar figure directly from that finding's estimatedImpact field or evidence.wastedSpend / evidence.lossMakingSpend — do not rephrase without numbers
+• estimatedImpact: copy the account-currency figure directly from that finding's estimatedImpact field or evidence.wastedSpend / evidence.lossMakingSpend — do not rephrase without numbers
 • recommendedAction: one specific action starting with a verb — "Pause the 3 zero-conversion campaigns identified in STR-009", not "Review campaign performance"
 
 quickWins (max 5, prefer MEDIUM/LOW severity findings):
@@ -517,18 +564,18 @@ confidenceNotes:
 
 clientReadyRecommendations (3 to 5 items — written for the client to hand to their agency):
 • headline: short, direct, action-oriented — a sentence the client can put in a Slack message to their agency
-• explanation: 2-3 sentences with exact evidence numbers only. Do not include made-up examples or newly calculated dollar amounts.
+• explanation: 2-3 sentences with exact evidence numbers only. Do not include made-up examples or newly calculated money amounts.
 • nextSteps: specific enough that a media buyer receiving this brief knows exactly what to do without needing to run their own analysis
 • sourceRuleIds: only rule IDs from ruleFindings
 
 segmentInsights (0 to 5 — only from SEG-WASTE-* findings if present):
-• Quote the exact segment + dimension + dollar from evidence: "The 45-54 age segment wasted $206 with zero conversions." Empty array if no segment findings.
+• Quote the exact segment + dimension + account-currency amount from evidence. Empty array if no segment findings.
 
 comparisonInsights (0 to 3 — only from evidencePacket.comparison.peer if present):
 • Name the peer account and the exact gap: "This account's CTR (1.0%) is 75% below your Best Account (4.0%) at the same spend band." Empty array if no peer.
 
 memoryInsights (0 to 3 — only from evidencePacket.comparison.selfOverTime if present):
-• Quote the exact delta vs the prior audit: "CPA worsened 100% (from $50 to $100) since your May 1 audit." Or improvement. Empty array if no prior audit.
+• Quote the exact delta vs the prior audit using the account currency code if money values are present. Or improvement. Empty array if no prior audit.
 
 dataConfidenceSummary:
 • One sentence reflecting evidencePacket.dataConfidence. Null if unknown.

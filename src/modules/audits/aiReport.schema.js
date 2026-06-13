@@ -19,6 +19,10 @@ export const aiReportJsonSchema = {
     "benchmarkComparisons",
   ],
   properties: {
+    premiumReport: {
+      type: "object",
+      additionalProperties: true,
+    },
     executiveSummary: {
       type: "array",
       minItems: 2,

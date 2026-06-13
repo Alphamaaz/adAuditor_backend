@@ -139,6 +139,44 @@ export const updateUserStatus = async (req, res) => {
   });
 };
 
+export const deleteUser = async (req, res) => {
+  const { userId } = req.params;
+
+  if (userId === req.user.id) {
+    throw badRequest("You cannot delete your own admin account");
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) throw notFound("User not found");
+
+  if (user.internalRole === "SUPER_ADMIN") {
+    throw badRequest("Cannot delete a Super Admin");
+  }
+
+  const updatedUser = await prisma.$transaction(async (tx) => {
+    await tx.authSession.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    return tx.user.update({
+      where: { id: userId },
+      data: { status: "DELETED" },
+      include: {
+        memberships: {
+          include: { organization: true },
+        },
+      },
+    });
+  });
+
+  res.json({
+    status: "success",
+    message: "User account soft-deleted. Existing sessions have been revoked.",
+    data: serializeAdminUser(updatedUser),
+  });
+};
+
 export const listOrganizations = async (req, res) => {
   const { page, limit, search } = req.query;
   const skip = (page - 1) * limit;
@@ -328,4 +366,3 @@ export const updateOrganizationPlan = async (req, res) => {
     data: planOverride,
   });
 };
-

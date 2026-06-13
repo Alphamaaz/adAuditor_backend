@@ -26,6 +26,7 @@ import {
   getAudit,
   getAuditComparison,
   getAuditHistory,
+  getAuditPremiumReportHtml,
   listAdAccounts,
   listAudits,
   runAudit,
@@ -85,6 +86,7 @@ router.post(
 );
 router.post("/:auditId/pdf", asyncHandler(generatePdfReport));
 router.get("/:auditId/pdf/:pdfReportId/download", asyncHandler(downloadPdfReport));
+router.get("/:auditId/report/html", asyncHandler(getAuditPremiumReportHtml));
 router.get("/:auditId", asyncHandler(getAudit));
 
 export default router;

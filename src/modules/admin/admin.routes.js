@@ -6,6 +6,7 @@ import {
   getStats,
   listUsers,
   updateUserStatus,
+  deleteUser,
   listOrganizations,
   impersonateUser,
   stopImpersonation,
@@ -39,6 +40,13 @@ router.patch(
   requireInternalRole("SUPER_ADMIN"),
   validateBody(updateUserStatusSchema),
   asyncHandler(updateUserStatus)
+);
+
+router.delete(
+  "/users/:userId",
+  requireAuth,
+  requireInternalRole("SUPER_ADMIN"),
+  asyncHandler(deleteUser)
 );
 
 router.get(

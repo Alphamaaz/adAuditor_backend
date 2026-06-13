@@ -78,6 +78,36 @@ const fetchUserWithMemberships = (tx, userId) =>
     },
   });
 
+const assertUserCanAuthenticate = (user) => {
+  if (user.status === "PENDING") {
+    throw unauthorized(
+      "Please verify your email address before logging in. Check your inbox or request a new code."
+    );
+  }
+
+  if (user.status === "SUSPENDED") {
+    throw forbidden("Your account has been suspended. Please contact support.");
+  }
+
+  if (user.status === "DELETED") {
+    throw forbidden("This account has been deleted. Please contact support.");
+  }
+
+  if (user.status !== "ACTIVE") {
+    throw unauthorized("Your account is not active.");
+  }
+};
+
+const assertSocialUserCanAuthenticate = (user) => {
+  if (user.status === "SUSPENDED") {
+    throw forbidden("Your account has been suspended. Please contact support.");
+  }
+
+  if (user.status === "DELETED") {
+    throw forbidden("This account has been deleted. Please contact support.");
+  }
+};
+
 // OTP helpers
 
 const issueVerificationToken = async (tx, userId, purpose) => {
@@ -277,19 +307,7 @@ export const login = async (req, res) => {
     throw unauthorized("Invalid email or password.");
   }
 
-  if (user.status === "PENDING") {
-    throw unauthorized(
-      "Please verify your email address before logging in. Check your inbox or request a new code."
-    );
-  }
-
-  if (user.status === "SUSPENDED") {
-    throw forbidden("Your account has been suspended. Please contact support.");
-  }
-
-  if (user.status !== "ACTIVE") {
-    throw unauthorized("Your account is not active.");
-  }
+  assertUserCanAuthenticate(user);
 
   const token = await prisma.$transaction(async (tx) => {
     await tx.user.update({
@@ -539,9 +557,7 @@ const upsertSocialUser = async (tx, req, { field, id, email, name }) => {
     user = await tx.user.findFirst({ where: { email } });
   }
 
-  if (user?.status === "SUSPENDED") {
-    throw forbidden("Your account has been suspended. Please contact support.");
-  }
+  if (user) assertSocialUserCanAuthenticate(user);
 
   if (!user) {
     // 3) No provider-ID match AND either (a) no email match OR (b) email
@@ -785,9 +801,7 @@ export const googleAuth = async (req, res) => {
       where: { OR: [{ googleId }, { email }] },
     });
 
-    if (user?.status === "SUSPENDED") {
-      throw forbidden("Your account has been suspended. Please contact support.");
-    }
+    if (user) assertSocialUserCanAuthenticate(user);
 
     if (!user) {
       // Brand new user — create account, org, and trial subscription.

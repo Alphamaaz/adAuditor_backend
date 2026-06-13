@@ -20,6 +20,7 @@ import {
 } from "./manualUpload.service.js";
 import { calculateUploadReadiness } from "./uploadReadiness.service.js";
 import { resolveStoredPdfPath } from "./pdfReport.service.js";
+import { renderAuditPremiumReportHtml } from "./premiumReportRenderer.service.js";
 import {
   enqueueGenerateAiReport,
   enqueueGeneratePdfReport,
@@ -313,6 +314,46 @@ export const getAudit = async (req, res) => {
     status: "success",
     data: serializeAudit(audit),
   });
+};
+
+export const getAuditPremiumReportHtml = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+  const audit = await prisma.audit.findFirst({
+    where: {
+      id: req.params.auditId,
+      organizationId,
+    },
+    include: {
+      adAccount: true,
+      intakeResponses: true,
+      uploadedFiles: {
+        orderBy: {
+          createdAt: "desc",
+        },
+      },
+      normalizedDataset: true,
+      ruleFindings: {
+        orderBy: {
+          createdAt: "desc",
+        },
+      },
+      aiReport: true,
+      pdfReports: {
+        orderBy: {
+          createdAt: "desc",
+        },
+      },
+    },
+  });
+
+  if (!audit) {
+    throw notFound("Audit not found");
+  }
+
+  res
+    .status(200)
+    .type("html")
+    .send(renderAuditPremiumReportHtml({ ...audit, uploadReadiness: calculateUploadReadiness(audit) }));
 };
 
 export const generatePdfReport = async (req, res) => {

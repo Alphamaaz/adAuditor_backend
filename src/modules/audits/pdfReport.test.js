@@ -41,7 +41,9 @@ describe("PDF generation with v2 evidence-packet fields", () => {
     const result = await generateAuditPdfFile({ audit: auditWithV2Output(), version: 1 });
     expect(fs.existsSync(result.absolutePath)).toBe(true);
     expect(fs.statSync(result.absolutePath).size).toBeGreaterThan(0);
-  });
+    expect(fs.existsSync(result.absoluteHtmlPath)).toBe(true);
+    expect(fs.readFileSync(result.absoluteHtmlPath, "utf8")).toContain("AdAdviser");
+  }, 30000);
 
   it("generates a PDF for an OLD report missing v2 fields (backward compat)", async () => {
     process.env.PDF_STORAGE_DIR = TMP;
@@ -53,7 +55,7 @@ describe("PDF generation with v2 evidence-packet fields", () => {
     audit.id = "pdf_test_legacy";
     const result = await generateAuditPdfFile({ audit, version: 1 });
     expect(fs.existsSync(result.absolutePath)).toBe(true);
-  });
+  }, 30000);
 });
 
 afterAll(() => {
