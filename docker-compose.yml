@@ -28,8 +28,6 @@ services:
       - REDIS_URL=redis://redis:6379
       - PORT=5000
       - NODE_ENV=production
-      - SESSION_SECRET=change_me_to_a_long_random_string
-      - JWT_SECRET=change_me_to_a_long_random_string
       - APP_URL=https://adadviser.uk
       - API_URL=https://api.adadviser.uk
       # Storage: mount a named volume so generated PDFs + uploads survive
