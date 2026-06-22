@@ -28,6 +28,7 @@ import {
   buildMetaNormalizedDataset,
   normalizeBreakdownInsights,
   normalizeDailyInsights,
+  resolveAccountFamilies,
 } from "./metaNormalizer.service.js";
 import {
   exchangeCodeForToken as exchangeTikTokCode,
@@ -35,11 +36,13 @@ import {
   fetchCampaignReport as fetchTikTokCampaigns,
   fetchAdGroupReport as fetchTikTokAdGroups,
   fetchAdReport as fetchTikTokAds,
+  fetchAudienceBreakdowns as fetchTikTokBreakdowns,
 } from "./tiktok.service.js";
 import {
   normalizeCampaigns as normalizeTikTokCampaigns,
   normalizeAdGroups as normalizeTikTokAdGroups,
   normalizeAds as normalizeTikTokAds,
+  buildTikTokByDimension,
   buildTikTokNormalizedDataset,
 } from "./tiktokNormalizer.service.js";
 import {
@@ -59,6 +62,14 @@ import {
   fetchPMaxAssets,
   fetchShoppingProducts,
   fetchAudienceBidding,
+  fetchAudiencePerformance,
+  fetchCampaignDeviceBreakdown,
+  fetchLandingPagePerformance,
+  fetchGeoPerformance,
+  resolveGeoTargetNames,
+  resolveAudienceNames,
+  fetchConversionActions,
+  fetchCampaignAssets,
 } from "./google.service.js";
 import {
   normalizeCampaigns,
@@ -70,6 +81,12 @@ import {
   normalizePMaxAssets,
   normalizeShoppingProducts,
   normalizeAudienceBidding,
+  normalizeAudiencePerformance,
+  normalizeCampaignDevicePerformance,
+  normalizeLandingPagePerformance,
+  normalizeGeoPerformance,
+  normalizeConversionActions,
+  normalizeCampaignAssets,
   normalizeGoogleDailySegments,
   buildGoogleByDimension,
   buildGoogleNormalizedDataset,
@@ -79,10 +96,37 @@ const GOOGLE_CALLBACK_URL =
   process.env.GOOGLE_CALLBACK_URL ||
   "http://localhost:5000/api/platform-connections/google/callback";
 
-
 const META_CALLBACK_URL =
   process.env.META_CALLBACK_URL ||
   "http://localhost:5000/api/platform-connections/meta/callback";
+
+// ── Date-range helpers ───────────────────────────────────────────────────────
+
+// Convert a user-selected lookback (days) to a Google GAQL dateRange param.
+// LAST_7/14/30_DAYS use named ranges (efficient); anything else passes the raw
+// number so dateFilter() computes a BETWEEN clause.
+const toGoogleDateParam = (days = 30) => {
+  if (days <= 7)  return "LAST_7_DAYS";
+  if (days <= 14) return "LAST_14_DAYS";
+  if (days <= 30) return "LAST_30_DAYS";
+  return days; // numeric → dateFilter uses BETWEEN
+};
+
+// Convert a user-selected lookback (days) to a Meta date param.
+// Returns a string preset for values Meta supports natively, or a
+// {since, until} object that buildDateParams() converts to time_range.
+const toMetaDateParam = (days = 30) => {
+  if (days <= 7)  return "last_7d";
+  if (days <= 14) return "last_14d";
+  if (days <= 28) return "last_28d";
+  if (days <= 30) return "last_30d";
+  if (days >= 90) return "last_90d";
+  const fmt = (d) => d.toISOString().split("T")[0];
+  const until = new Date();
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  return { since: fmt(since), until: fmt(until) };
+};
 
 // ── OAuth handshake ──────────────────────────────────────────────────────────
 
@@ -153,7 +197,11 @@ export const metaOAuthCallback = async (req, res) => {
     // Verify the token and get user_id from Meta
     const tokenInfo = await debugToken(accessToken);
     if (!tokenInfo.is_valid) {
-      return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=invalid_token&platform=META`);
+      const errMsg = encodeURIComponent("Meta token validation failed. Please try again.");
+      const errUrl = auditId
+        ? `${FRONTEND_BASE}/dashboard/audits/${auditId}/connect?platform=META&oauth_error=${errMsg}`
+        : `${FRONTEND_BASE}/dashboard?oauth_error=${errMsg}&platform=META`;
+      return res.redirect(errUrl);
     }
 
     const encryptedToken = encrypt(accessToken);
@@ -201,8 +249,11 @@ export const metaOAuthCallback = async (req, res) => {
     return res.redirect(successUrl);
   } catch (err) {
     console.error("[Meta OAuth Callback Error]", err.message);
-    const errMsg = encodeURIComponent("Failed to complete Meta connection. Please try again.");
-    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${errMsg}&platform=META`);
+    const errMsg = encodeURIComponent(err.message || "Failed to complete Meta connection. Please try again.");
+    const errUrl = auditId
+      ? `${FRONTEND_BASE}/dashboard/audits/${auditId}/connect?platform=META&oauth_error=${errMsg}`
+      : `${FRONTEND_BASE}/dashboard?oauth_error=${errMsg}&platform=META`;
+    return res.redirect(errUrl);
   }
 };
 
@@ -234,12 +285,15 @@ export const initTikTokOAuth = async (req, res) => {
  * Step 2: TikTok redirects back with a code.
  */
 export const tikTokOAuthCallback = async (req, res) => {
-  // TikTok Business API sends auth_code (not code)
-  const { auth_code, state, error, error_description } = req.query;
+  // TikTok Business API sends auth_code; fall back to code for robustness
+  const { auth_code, code: fallbackCode, state, error, error_description } = req.query;
+  const authCode = auth_code || fallbackCode;
   const FRONTEND_BASE = process.env.CLIENT_ORIGIN || "http://localhost:3000";
 
-  if (error || !auth_code || !state) {
-    const msg = encodeURIComponent(error_description || "Missing OAuth auth_code");
+  console.log("[TikTok Callback] Query params:", { auth_code: !!auth_code, code: !!fallbackCode, state: !!state, error });
+
+  if (error || !authCode || !state) {
+    const msg = encodeURIComponent(error_description || error || "Missing OAuth auth_code from TikTok");
     return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${msg}&platform=TIKTOK`);
   }
 
@@ -255,7 +309,7 @@ export const tikTokOAuthCallback = async (req, res) => {
 
   try {
     // Business API token exchange — no refresh token, token is session-based
-    const tokenData = await exchangeTikTokCode(auth_code);
+    const tokenData = await exchangeTikTokCode(authCode);
     const accessToken = tokenData.access_token;
     const advertiserIds = tokenData.advertiser_ids || [];
     const scopes = Array.isArray(tokenData.scope)
@@ -295,8 +349,11 @@ export const tikTokOAuthCallback = async (req, res) => {
     return res.redirect(successUrl);
   } catch (err) {
     console.error("[TikTok OAuth Callback Error]", err.message);
-    const msg = encodeURIComponent("Failed to complete TikTok connection. Please try again.");
-    return res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=${msg}&platform=TIKTOK`);
+    const msg = encodeURIComponent(err.message || "Failed to complete TikTok connection. Please try again.");
+    const errUrl = auditId
+      ? `${FRONTEND_BASE}/dashboard/audits/${auditId}/connect?platform=TIKTOK&oauth_error=${msg}`
+      : `${FRONTEND_BASE}/dashboard?oauth_error=${msg}&platform=TIKTOK`;
+    return res.redirect(errUrl);
   }
 };
 
@@ -367,11 +424,14 @@ export const fetchTikTokDataForAudit = async (req, res) => {
 
   const accessToken = decrypt(connection.accessTokenEncrypted);
 
+  const lookbackDays = audit.businessProfileSnapshot?.sectionA?.lookbackDays || 30;
+  console.log(`[TikTok Ads] Lookback: ${lookbackDays} days`);
+
   console.log("[TikTok Ads] Fetching campaigns, ad groups, and ads in parallel...");
   const [rawCampaigns30d, rawAdGroups30d, rawAds30d, rawCampaigns90d] = await Promise.all([
-    fetchTikTokCampaigns(accessToken, advertiserId, 30),
-    fetchTikTokAdGroups(accessToken, advertiserId, 30),
-    fetchTikTokAds(accessToken, advertiserId, 30),
+    fetchTikTokCampaigns(accessToken, advertiserId, lookbackDays),
+    fetchTikTokAdGroups(accessToken, advertiserId, lookbackDays),
+    fetchTikTokAds(accessToken, advertiserId, lookbackDays),
     fetchTikTokCampaigns(accessToken, advertiserId, 90),
   ]);
 
@@ -395,7 +455,25 @@ export const fetchTikTokDataForAudit = async (req, res) => {
     // currency stays null — non-critical
   }
 
-  const tiktokDataset = buildTikTokNormalizedDataset({ campaignRecords: campaigns, adGroupRecords: adGroups, adRecords: ads, currency });
+  // Audience breakdowns (age / gender / country) — BEST-EFFORT. Powers
+  // SEG-WASTE-001 + the Deep Audit segment tool for TikTok (byDimension was empty
+  // before this). A breakdown failure must never fail the audit.
+  let tiktokByDimension = {};
+  try {
+    const breakdowns = await fetchTikTokBreakdowns(accessToken, advertiserId, lookbackDays);
+    tiktokByDimension = buildTikTokByDimension(breakdowns);
+    console.log(`[TikTok Ads] Built byDimension: ${Object.keys(tiktokByDimension).join(", ") || "none"}`);
+  } catch (bdErr) {
+    console.warn(`[TikTok Ads] audience breakdown fetch failed (non-fatal): ${bdErr.message}`);
+  }
+
+  const tiktokDataset = buildTikTokNormalizedDataset({
+    campaignRecords: campaigns,
+    adGroupRecords: adGroups,
+    adRecords: ads,
+    currency,
+    byDimension: tiktokByDimension,
+  });
   tiktokDataset.data.platforms.TIKTOK.byLevel.campaign_90d = campaigns90d;
 
   await prisma.$transaction(async (tx) => {
@@ -559,6 +637,10 @@ export const fetchMetaDataForAudit = async (req, res) => {
 
   const accessToken = decrypt(connection.accessTokenEncrypted);
 
+  const lookbackDays = audit.businessProfileSnapshot?.sectionA?.lookbackDays || 30;
+  const metaDateParam = toMetaDateParam(lookbackDays);
+  console.log(`[Meta Ads] Lookback: ${lookbackDays} days`);
+
   // The Meta ad account ID from their API is prefixed with "act_"
   const adAccountId = externalAdAccountId.startsWith("act_")
     ? externalAdAccountId
@@ -588,14 +670,19 @@ export const fetchMetaDataForAudit = async (req, res) => {
     adStructure,
     campaignInsights90d,
   ] = await Promise.all([
-    fetchCampaignInsights(accessToken, adAccountId, "last_30d"),
-    fetchAdSetInsights(accessToken, adAccountId, "last_30d"),
-    fetchAdInsights(accessToken, adAccountId, "last_30d"),
+    fetchCampaignInsights(accessToken, adAccountId, metaDateParam),
+    fetchAdSetInsights(accessToken, adAccountId, metaDateParam),
+    fetchAdInsights(accessToken, adAccountId, metaDateParam),
     fetchCampaigns(accessToken, adAccountId),
     fetchAdSets(accessToken, adAccountId),
     fetchAds(accessToken, adAccountId),
     fetchCampaignInsights(accessToken, adAccountId, "last_90d"),
   ]);
+
+  // Resolve the account's dominant result families (messaging vs leads vs
+  // purchases …) from campaign objectives. Ads, breakdowns, and the daily series
+  // don't carry their own objective, so they read results through these.
+  const resultFamilies = resolveAccountFamilies(campaignInsights30d);
 
   // Normalize + enrich with structural data
   const campaigns = enrichCampaignsWithStructure(
@@ -607,7 +694,7 @@ export const fetchMetaDataForAudit = async (req, res) => {
     adSetStructure
   );
   const ads = enrichAdsWithStructure(
-    normalizeAdInsights(adInsights30d),
+    normalizeAdInsights(adInsights30d, resultFamilies),
     adStructure
   );
   const campaigns90d = normalizeCampaignInsights(campaignInsights90d);
@@ -619,11 +706,11 @@ export const fetchMetaDataForAudit = async (req, res) => {
   const [breakdownResults, dailyResult] = await Promise.all([
     Promise.allSettled(
       breakdownKeys.map((key) =>
-        fetchBreakdownInsights(accessToken, adAccountId, key, "last_30d")
+        fetchBreakdownInsights(accessToken, adAccountId, key, metaDateParam)
       )
     ),
     Promise.allSettled([
-      fetchDailyInsights(accessToken, adAccountId, "last_30d"),
+      fetchDailyInsights(accessToken, adAccountId, metaDateParam),
     ]),
   ]);
 
@@ -634,13 +721,13 @@ export const fetchMetaDataForAudit = async (req, res) => {
     }
     const key = breakdownKeys[index];
     const segmentField = META_BREAKDOWNS[key].field;
-    const rows = normalizeBreakdownInsights(res.value, key, segmentField);
+    const rows = normalizeBreakdownInsights(res.value, key, segmentField, resultFamilies);
     if (rows.length > 0) byDimension[key] = rows;
   });
 
   const byDay =
     dailyResult[0]?.status === "fulfilled"
-      ? normalizeDailyInsights(dailyResult[0].value)
+      ? normalizeDailyInsights(dailyResult[0].value, resultFamilies)
       : [];
 
   // Build the normalized dataset in the schema the rule engine expects
@@ -847,7 +934,11 @@ export const googleOAuthCallback = async (req, res) => {
     }
   } catch (err) {
     console.error("[Google OAuth Callback Error]", err);
-    res.redirect(`${FRONTEND_BASE}/dashboard?oauth_error=server_error&platform=GOOGLE`);
+    const errMsg = encodeURIComponent(err.message || "Failed to complete Google connection. Please try again.");
+    const errUrl = auditId
+      ? `${FRONTEND_BASE}/dashboard/audits/${auditId}/connect?platform=GOOGLE&oauth_error=${errMsg}`
+      : `${FRONTEND_BASE}/dashboard?oauth_error=${errMsg}&platform=GOOGLE`;
+    res.redirect(errUrl);
   }
 };
 
@@ -940,10 +1031,13 @@ export const listGoogleAdAccounts = async (req, res) => {
  * Fetches all Google Ads data for an audit and stores it as a NormalizedDataset.
  * Body: { auditId, customerId }
  */
-export const fetchGoogleDataForAudit = async (req, res) => {
-  const organizationId = getOrganizationId(req);
-  const { auditId, customerId } = req.body;
-
+/**
+ * Headless Google data sync — the same pull the manual connect flow runs, but
+ * callable from a job (scheduled re-audit) with no req/res. Refreshes the stored
+ * token, pulls all report levels, normalizes, and writes the audit's
+ * normalizedDataset. Returns a summary. The HTTP handler below is a thin wrapper.
+ */
+export const syncGoogleToAudit = async ({ organizationId, auditId, customerId }) => {
   if (!auditId || !customerId) {
     throw badRequest("auditId and customerId are required.");
   }
@@ -971,6 +1065,10 @@ export const fetchGoogleDataForAudit = async (req, res) => {
 
   const accessToken = await getValidGoogleAccessToken(connection);
 
+  const lookbackDays = audit.businessProfileSnapshot?.sectionA?.lookbackDays || 30;
+  const googleDateParam = toGoogleDateParam(lookbackDays);
+  console.log(`[Google Ads] Lookback: ${lookbackDays} days (${googleDateParam})`);
+
   // Fetch customer info for currency
   const customerInfo = await fetchCustomerInfo(accessToken, customerId);
   const currency = customerInfo?.currencyCode || null;
@@ -992,12 +1090,12 @@ export const fetchGoogleDataForAudit = async (req, res) => {
     const subResults = await Promise.all(
       subAccounts.map((sub) =>
         Promise.all([
-          fetchCampaignsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
-          fetchAdGroupsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
-          fetchAdsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
+          fetchCampaignsWithMetrics(accessToken, sub.id, googleDateParam, customerId),
+          fetchAdGroupsWithMetrics(accessToken, sub.id, googleDateParam, customerId),
+          fetchAdsWithMetrics(accessToken, sub.id, googleDateParam, customerId),
           fetchCampaignsWithMetrics(accessToken, sub.id, "LAST_90_DAYS", customerId),
-          fetchKeywordsWithMetrics(accessToken, sub.id, "LAST_30_DAYS", customerId),
-          fetchSearchTerms(accessToken, sub.id, customerId),
+          fetchKeywordsWithMetrics(accessToken, sub.id, googleDateParam, customerId),
+          fetchSearchTerms(accessToken, sub.id, customerId, googleDateParam),
           fetchNegativeKeywordLists(accessToken, sub.id, customerId),
           fetchPMaxAssets(accessToken, sub.id, customerId),
           fetchShoppingProducts(accessToken, sub.id, customerId),
@@ -1021,12 +1119,12 @@ export const fetchGoogleDataForAudit = async (req, res) => {
       rawKeywords, rawSearchTerms, rawNegativeLists, rawPMaxAssets,
       rawShoppingProducts, rawAudienceBidding,
     ] = await Promise.all([
-      fetchCampaignsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
-      fetchAdGroupsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
-      fetchAdsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
+      fetchCampaignsWithMetrics(accessToken, customerId, googleDateParam),
+      fetchAdGroupsWithMetrics(accessToken, customerId, googleDateParam),
+      fetchAdsWithMetrics(accessToken, customerId, googleDateParam),
       fetchCampaignsWithMetrics(accessToken, customerId, "LAST_90_DAYS"),
-      fetchKeywordsWithMetrics(accessToken, customerId, "LAST_30_DAYS"),
-      fetchSearchTerms(accessToken, customerId),
+      fetchKeywordsWithMetrics(accessToken, customerId, googleDateParam),
+      fetchSearchTerms(accessToken, customerId, null, googleDateParam),
       fetchNegativeKeywordLists(accessToken, customerId),
       fetchPMaxAssets(accessToken, customerId),
       fetchShoppingProducts(accessToken, customerId),
@@ -1057,7 +1155,7 @@ export const fetchGoogleDataForAudit = async (req, res) => {
   // Daily time series — BEST-EFFORT. Never fail the audit on a daily-fetch error.
   let googleByDay = [];
   try {
-    const dailyRows = await fetchDailySegments(accessToken, customerId, "LAST_30_DAYS");
+    const dailyRows = await fetchDailySegments(accessToken, customerId, googleDateParam);
     googleByDay = normalizeGoogleDailySegments(dailyRows);
   } catch (dailyErr) {
     console.warn(`[Google Ads] daily segment fetch failed (non-fatal): ${dailyErr.message}`);
@@ -1069,11 +1167,117 @@ export const fetchGoogleDataForAudit = async (req, res) => {
   let googleByDimension = {};
   try {
     if (!customerInfo?.manager) {
-      const breakdowns = await fetchSegmentBreakdowns(accessToken, customerId, "LAST_30_DAYS");
+      const breakdowns = await fetchSegmentBreakdowns(accessToken, customerId, googleDateParam);
       googleByDimension = buildGoogleByDimension(breakdowns);
     }
   } catch (segErr) {
     console.warn(`[Google Ads] segment breakdown fetch failed (non-fatal): ${segErr.message}`);
+  }
+
+  // Audience performance (per-campaign, WITH metrics) — BEST-EFFORT. Powers
+  // GOOGLE-AUD-001 (mis-applied audience detection). Kept out of the main
+  // Promise.all so an ad_group_audience_view error can never fail the audit.
+  // Manager accounts skipped (audiences live on sub-accounts).
+  let audiencePerformance = [];
+  try {
+    if (!customerInfo?.manager) {
+      const rawAudiencePerf = await fetchAudiencePerformance(accessToken, customerId, googleDateParam);
+      // Resolve criterion resources to readable audience names (best-effort) so
+      // findings read "Audience 'Loan Seekers'" not "Audience #2488…".
+      const userListResources = rawAudiencePerf
+        .map((r) => r.adGroupCriterion?.userList?.userList)
+        .filter(Boolean);
+      const customAudienceResources = rawAudiencePerf
+        .map((r) => r.adGroupCriterion?.customAudience?.customAudience)
+        .filter(Boolean);
+      let audienceNames = {};
+      try {
+        audienceNames = await resolveAudienceNames(accessToken, customerId, {
+          userListResources,
+          customAudienceResources,
+        });
+      } catch (resolveErr) {
+        console.warn(`[Google Ads] audience name resolution failed (non-fatal): ${resolveErr.message}`);
+      }
+      audiencePerformance = normalizeAudiencePerformance(rawAudiencePerf, audienceNames);
+      console.log(`[Google Ads] Normalized ${audiencePerformance.length} audience performance row(s).`);
+    }
+  } catch (audErr) {
+    console.warn(`[Google Ads] audience performance fetch failed (non-fatal): ${audErr.message}`);
+  }
+
+  // Campaign×device — BEST-EFFORT. Powers GOOGLE-DEVICE-001 (in-campaign device waste).
+  let campaignDevice = [];
+  try {
+    if (!customerInfo?.manager) {
+      const rawDevice = await fetchCampaignDeviceBreakdown(accessToken, customerId, googleDateParam);
+      campaignDevice = normalizeCampaignDevicePerformance(rawDevice);
+      console.log(`[Google Ads] Normalized ${campaignDevice.length} campaign×device row(s).`);
+    }
+  } catch (devErr) {
+    console.warn(`[Google Ads] campaign×device fetch failed (non-fatal): ${devErr.message}`);
+  }
+
+  // Landing pages — BEST-EFFORT. Powers GOOGLE-LP-001 (CVR divergence by URL).
+  let landingPages = [];
+  try {
+    if (!customerInfo?.manager) {
+      const rawLp = await fetchLandingPagePerformance(accessToken, customerId, googleDateParam);
+      landingPages = normalizeLandingPagePerformance(rawLp);
+      console.log(`[Google Ads] Normalized ${landingPages.length} landing page row(s).`);
+    }
+  } catch (lpErr) {
+    console.warn(`[Google Ads] landing page fetch failed (non-fatal): ${lpErr.message}`);
+  }
+
+  // Geo — BEST-EFFORT. Country ids resolved to names in a second batched query.
+  // Powers GOOGLE-GEO-001 (spend leaking to under-performing markets).
+  let geoPerformance = [];
+  try {
+    if (!customerInfo?.manager) {
+      const rawGeo = await fetchGeoPerformance(accessToken, customerId, googleDateParam);
+      const countryIds = rawGeo
+        .map((r) => r.geographicView?.countryCriterionId)
+        .filter((id) => id != null);
+      let geoNames = {};
+      try {
+        geoNames = await resolveGeoTargetNames(accessToken, customerId, countryIds);
+      } catch (resolveErr) {
+        console.warn(`[Google Ads] geo name resolution failed (non-fatal): ${resolveErr.message}`);
+      }
+      geoPerformance = normalizeGeoPerformance(rawGeo, geoNames);
+      console.log(`[Google Ads] Normalized ${geoPerformance.length} geo row(s).`);
+    }
+  } catch (geoErr) {
+    console.warn(`[Google Ads] geo fetch failed (non-fatal): ${geoErr.message}`);
+  }
+
+  // Conversion-action config — BEST-EFFORT. Powers GOOGLE-CONV-001
+  // (conversion-tracking health). Manager accounts skipped (conversion actions
+  // live on sub-accounts).
+  let conversionActions = [];
+  try {
+    if (!customerInfo?.manager) {
+      const rawConvActions = await fetchConversionActions(accessToken, customerId);
+      conversionActions = normalizeConversionActions(rawConvActions);
+      console.log(`[Google Ads] Normalized ${conversionActions.length} conversion action(s).`);
+    }
+  } catch (convErr) {
+    console.warn(`[Google Ads] conversion action fetch failed (non-fatal): ${convErr.message}`);
+  }
+
+  // Campaign assets (ad extensions) — BEST-EFFORT. Powers GOOGLE-EXT-001
+  // (missing extension coverage). Manager accounts skipped (assets live on
+  // sub-accounts).
+  let campaignAssets = [];
+  try {
+    if (!customerInfo?.manager) {
+      const rawAssets = await fetchCampaignAssets(accessToken, customerId);
+      campaignAssets = normalizeCampaignAssets(rawAssets);
+      console.log(`[Google Ads] Normalized ${campaignAssets.length} campaign asset row(s).`);
+    }
+  } catch (assetErr) {
+    console.warn(`[Google Ads] campaign asset fetch failed (non-fatal): ${assetErr.message}`);
   }
 
   const googleDataset = buildGoogleNormalizedDataset({
@@ -1086,6 +1290,12 @@ export const fetchGoogleDataForAudit = async (req, res) => {
     pmaxAssetRecords: pmaxAssets,
     shoppingProductRecords: shoppingProducts,
     audienceBiddingRecords: audienceBidding,
+    audiencePerformanceRecords: audiencePerformance,
+    campaignDeviceRecords: campaignDevice,
+    landingPageRecords: landingPages,
+    geoRecords: geoPerformance,
+    conversionActionRecords: conversionActions,
+    campaignAssetRecords: campaignAssets,
     currency,
     byDay: googleByDay,
     byDimension: googleByDimension,
@@ -1163,14 +1373,21 @@ export const fetchGoogleDataForAudit = async (req, res) => {
   console.log("[Google Ads] ✓ Data stored. Summary:", summaryOut);
   console.log(`[Google Ads] ═══ Data fetch complete ═══\n`);
 
+  return { auditId, platform: "GOOGLE", customerId, currency, summary: summaryOut };
+};
+
+/**
+ * POST /api/platform-connections/google/fetch
+ * Body: { auditId, customerId } — thin HTTP wrapper over syncGoogleToAudit.
+ */
+export const fetchGoogleDataForAudit = async (req, res) => {
+  const organizationId = getOrganizationId(req);
+  const { auditId, customerId } = req.body;
+  const data = await syncGoogleToAudit({ organizationId, auditId, customerId });
   res.json({
     status: "success",
     data: {
-      auditId,
-      platform: "GOOGLE",
-      customerId,
-      currency,
-      summary: summaryOut,
+      ...data,
       message: "Google Ads data fetched and normalized. You can now run the audit.",
     },
   });

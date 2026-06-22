@@ -29,6 +29,13 @@ const send = async ({ to, subject, text, html }) => {
   await transport.sendMail({ from: FROM_ADDRESS, to, subject, text, html });
 };
 
+/**
+ * Send a composed audit-alert email. `to` may be a single address or a
+ * comma-separated list. Falls back to console logging when SMTP is unconfigured.
+ */
+export const sendAuditAlertEmail = ({ to, subject, html, text }) =>
+  send({ to, subject, html, text });
+
 export const sendVerificationEmail = (email, otp) =>
   send({
     to: email,

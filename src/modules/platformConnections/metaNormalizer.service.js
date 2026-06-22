@@ -4,33 +4,28 @@
  *
  * This means the rule engine (auditEngine.service.js) works identically
  * whether data came from a CSV upload or an OAuth API fetch.
+ *
+ * Result counting is objective-aware — see metaResults.service.js. The old
+ * fixed-priority "primary result" picker under-counted messaging accounts ~5×
+ * (it preferred a windowed messaging subset over the full count); that poisoned
+ * every baseline-derived figure in the audit.
  */
+
+import {
+  resolveResult,
+  resolveAccountFamilies,
+  resultForFamilies,
+} from "./metaResults.service.js";
+
+// Re-exported so the controller resolves account-level result families from the
+// same place it imports the normalizers.
+export { resolveAccountFamilies } from "./metaResults.service.js";
 
 const parseNumber = (value) => {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (!value) return null;
   const number = Number(String(value).replace(/[^0-9.-]/g, ""));
   return Number.isFinite(number) ? number : null;
-};
-
-/**
- * Find the value for a given action type in the Meta `actions` array.
- * E.g. getActionValue(actions, 'purchase') → numeric count
- */
-const getActionValue = (actions, type) => {
-  if (!Array.isArray(actions)) return null;
-  const match = actions.find(
-    (a) => a.action_type === type || a.action_type?.endsWith(type)
-  );
-  return match ? parseNumber(match.value) : null;
-};
-
-const getCostPerAction = (costPerActionType, type) => {
-  if (!Array.isArray(costPerActionType)) return null;
-  const match = costPerActionType.find(
-    (a) => a.action_type === type || a.action_type?.endsWith(type)
-  );
-  return match ? parseNumber(match.value) : null;
 };
 
 const getRoas = (purchaseRoas) => {
@@ -40,81 +35,49 @@ const getRoas = (purchaseRoas) => {
 };
 
 /**
- * Result action types in priority order, spanning Meta objectives so that
- * "results" and cost-per-result are computable for non-purchase accounts —
- * messaging, lead-gen, app installs, subscriptions — not just sales.
- *
- * `getActionValue` matches by suffix, so "purchase" also catches omni_purchase
- * and offsite_conversion.fb_pixel_purchase, "app_install" catches
- * mobile_app_install, etc.
- *
- * Order = which result a mixed actions array reports as the primary one. A
- * messaging or app campaign carries none of the higher-priority types, so it
- * falls through to its own; a sales campaign still reports purchases first.
- * Mid-funnel actions (checkout, add-to-cart) rank last so they only surface
- * when no real conversion exists.
+ * Cost per result, computed from spend ÷ results so it is always consistent
+ * with the result count we report (rather than reading a separate
+ * cost-per-action figure that may key off a different action type).
  */
-const RESULT_ACTION_PRIORITY = [
-  "purchase",
-  "lead",
-  "lead_grouped",
-  "complete_registration",
-  "subscribe",
-  "start_trial",
-  "messaging_conversation_started_7d",
-  "total_messaging_connection",
-  "app_install",
-  "initiate_checkout",
-  "initiated_checkout",
-  "add_to_cart",
-];
+const cpaFromSpend = (spend, results) =>
+  results != null && results > 0 && spend != null ? round2(spend / results) : null;
 
-/**
- * The primary result count from an actions array, picking the highest-priority
- * objective present (value > 0). Returns null when none are found.
- */
-const getPrimaryResult = (actions) => {
-  for (const type of RESULT_ACTION_PRIORITY) {
-    const value = getActionValue(actions, type);
-    if (value != null && value > 0) return value;
-  }
-  return null;
-};
-
-/**
- * Cost per the primary result, matching the same objective priority order.
- */
-const getPrimaryResultCpa = (costPerActionType) => {
-  for (const type of RESULT_ACTION_PRIORITY) {
-    const value = getCostPerAction(costPerActionType, type);
-    if (value != null && value > 0) return value;
-  }
-  return null;
-};
+const round2 = (n) => (Number.isFinite(n) ? Math.round(n * 100) / 100 : null);
 
 // ── Campaign-level ──────────────────────────────────────────────────────────
 
 export const normalizeCampaignInsights = (insights) =>
-  insights.map((row) => ({
-    level: "campaign",
-    name: row.campaign_name,
-    status: null, // insights don't include structural status — enriched below
-    objective: row.objective || null,
-    budget: null,
-    spend: parseNumber(row.spend),
-    impressions: parseNumber(row.impressions),
-    reach: parseNumber(row.reach),
-    clicks: parseNumber(row.clicks),
-    cpm: parseNumber(row.cpm),
-    cpc: parseNumber(row.cpc),
-    ctr: parseNumber(row.ctr),
-    frequency: parseNumber(row.frequency),
-    results: getPrimaryResult(row.actions),
-    cpa: getPrimaryResultCpa(row.cost_per_action_type),
-    roas: getRoas(row.purchase_roas),
-    dateStart: row.date_start,
-    dateEnd: row.date_stop,
-  }));
+  insights.map((row) => {
+    const spend = parseNumber(row.spend);
+    const { results, resultFamily } = resolveResult(row.actions, {
+      objective: row.objective,
+    });
+    return {
+      level: "campaign",
+      name: row.campaign_name,
+      status: null, // insights don't include structural status — enriched below
+      objective: row.objective || null,
+      budget: null,
+      spend,
+      impressions: parseNumber(row.impressions),
+      reach: parseNumber(row.reach),
+      clicks: parseNumber(row.clicks),
+      cpm: parseNumber(row.cpm),
+      cpc: parseNumber(row.cpc),
+      ctr: parseNumber(row.ctr),
+      frequency: parseNumber(row.frequency),
+      // Link clicks (clicks to the destination) are distinct from all-clicks
+      // (likes, comments, expansions). Result/link-click is the cleaner read on
+      // whether traffic is converting once it lands.
+      linkClicks: parseNumber(row.inline_link_clicks),
+      results,
+      resultFamily,
+      cpa: cpaFromSpend(spend, results),
+      roas: getRoas(row.purchase_roas),
+      dateStart: row.date_start,
+      dateEnd: row.date_stop,
+    };
+  });
 
 /**
  * Enrich campaign insight records with structural data from the /campaigns endpoint.
@@ -142,25 +105,34 @@ export const enrichCampaignsWithStructure = (insightRecords, structureRecords) =
 // ── Ad set-level ────────────────────────────────────────────────────────────
 
 export const normalizeAdSetInsights = (insights) =>
-  insights.map((row) => ({
-    level: "adset",
-    name: row.adset_name,
-    campaignName: row.campaign_name,
-    status: null,
-    learningPhase: null,
-    budget: null,
-    spend: parseNumber(row.spend),
-    impressions: parseNumber(row.impressions),
-    reach: parseNumber(row.reach),
-    frequency: parseNumber(row.frequency),
-    clicks: parseNumber(row.clicks),
-    ctr: parseNumber(row.ctr),
-    results: getPrimaryResult(row.actions),
-    cpa: getPrimaryResultCpa(row.cost_per_action_type),
-    roas: getRoas(row.purchase_roas),
-    dateStart: row.date_start,
-    dateEnd: row.date_stop,
-  }));
+  insights.map((row) => {
+    const spend = parseNumber(row.spend);
+    // Ad-set insights carry `optimization_goal`, the most precise result signal.
+    const { results, resultFamily } = resolveResult(row.actions, {
+      optimizationGoal: row.optimization_goal,
+    });
+    return {
+      level: "adset",
+      name: row.adset_name,
+      campaignName: row.campaign_name,
+      status: null,
+      learningPhase: null,
+      optimizationGoal: row.optimization_goal || null,
+      budget: null,
+      spend,
+      impressions: parseNumber(row.impressions),
+      reach: parseNumber(row.reach),
+      frequency: parseNumber(row.frequency),
+      clicks: parseNumber(row.clicks),
+      ctr: parseNumber(row.ctr),
+      results,
+      resultFamily,
+      cpa: cpaFromSpend(spend, results),
+      roas: getRoas(row.purchase_roas),
+      dateStart: row.date_start,
+      dateEnd: row.date_stop,
+    };
+  });
 
 export const enrichAdSetsWithStructure = (insightRecords, structureRecords) => {
   const byName = {};
@@ -182,27 +154,50 @@ export const enrichAdSetsWithStructure = (insightRecords, structureRecords) => {
 
 // ── Ad-level ────────────────────────────────────────────────────────────────
 
-export const normalizeAdInsights = (insights) =>
-  insights.map((row) => ({
-    level: "ad",
-    name: row.ad_name,
-    adSetName: row.adset_name,
-    campaignName: row.campaign_name,
-    status: null,
-    spend: parseNumber(row.spend),
-    impressions: parseNumber(row.impressions),
-    reach: parseNumber(row.reach),
-    frequency: parseNumber(row.frequency),
-    clicks: parseNumber(row.clicks),
-    ctr: parseNumber(row.ctr),
-    results: getPrimaryResult(row.actions),
-    cpa: getPrimaryResultCpa(row.cost_per_action_type),
-    qualityRanking: row.quality_ranking || null,
-    engagementRanking: row.engagement_rate_ranking || null,
-    conversionRanking: row.conversion_rate_ranking || null,
-    dateStart: row.date_start,
-    dateEnd: row.date_stop,
-  }));
+/**
+ * Ad-level insight rows don't carry an objective, so result families are
+ * resolved once at the account level (from campaign objectives) and passed in.
+ */
+export const normalizeAdInsights = (insights, families) =>
+  insights.map((row) => {
+    const spend = parseNumber(row.spend);
+    const results = resultForFamilies(row.actions, families);
+    return {
+      level: "ad",
+      name: row.ad_name,
+      adSetName: row.adset_name,
+      campaignName: row.campaign_name,
+      status: null,
+      spend,
+      impressions: parseNumber(row.impressions),
+      reach: parseNumber(row.reach),
+      frequency: parseNumber(row.frequency),
+      clicks: parseNumber(row.clicks),
+      ctr: parseNumber(row.ctr),
+      results,
+      cpa: cpaFromSpend(spend, results),
+      qualityRanking: row.quality_ranking || null,
+      engagementRanking: row.engagement_rate_ranking || null,
+      conversionRanking: row.conversion_rate_ranking || null,
+      dateStart: row.date_start,
+      dateEnd: row.date_stop,
+    };
+  });
+
+/**
+ * Flatten Meta's `ad_review_feedback` ({ global|placement_specific: { reason:
+ * text } }) into a short, human-readable list of policy reasons.
+ */
+const summarizeReviewFeedback = (feedback) => {
+  if (!feedback || typeof feedback !== "object") return null;
+  const reasons = new Set();
+  for (const scope of Object.values(feedback)) {
+    if (scope && typeof scope === "object") {
+      for (const key of Object.keys(scope)) reasons.add(key);
+    }
+  }
+  return reasons.size ? Array.from(reasons).join("; ") : null;
+};
 
 export const enrichAdsWithStructure = (insightRecords, structureRecords) => {
   const byName = {};
@@ -216,6 +211,7 @@ export const enrichAdsWithStructure = (insightRecords, structureRecords) => {
     return {
       ...record,
       status: struct.effective_status || struct.status,
+      reviewFeedback: summarizeReviewFeedback(struct.ad_review_feedback),
     };
   });
 };
@@ -228,32 +224,39 @@ export const enrichAdsWithStructure = (insightRecords, structureRecords) => {
  * @param {string} dimension our canonical dimension key (age/gender/...)
  * @param {string} segmentField the Meta response field carrying the value
  */
-export const normalizeBreakdownInsights = (insights, dimension, segmentField) =>
-  (insights || []).map((row) => ({
-    dimension,
-    segment: row[segmentField] != null ? String(row[segmentField]) : "unknown",
-    spend: parseNumber(row.spend),
-    impressions: parseNumber(row.impressions),
-    clicks: parseNumber(row.clicks),
-    reach: parseNumber(row.reach),
-    results: getPrimaryResult(row.actions) || 0,
-    conversions: getPrimaryResult(row.actions) || 0,
-    cpa: getPrimaryResultCpa(row.cost_per_action_type),
-  }));
+export const normalizeBreakdownInsights = (insights, dimension, segmentField, families) =>
+  (insights || []).map((row) => {
+    const spend = parseNumber(row.spend);
+    const results = resultForFamilies(row.actions, families) || 0;
+    return {
+      dimension,
+      segment: row[segmentField] != null ? String(row[segmentField]) : "unknown",
+      spend,
+      impressions: parseNumber(row.impressions),
+      clicks: parseNumber(row.clicks),
+      reach: parseNumber(row.reach),
+      results,
+      conversions: results,
+      cpa: cpaFromSpend(spend, results),
+    };
+  });
 
 /**
  * Normalize daily time-series rows (time_increment=1).
  */
-export const normalizeDailyInsights = (insights) =>
-  (insights || []).map((row) => ({
-    date: row.date_start,
-    spend: parseNumber(row.spend),
-    impressions: parseNumber(row.impressions),
-    clicks: parseNumber(row.clicks),
-    reach: parseNumber(row.reach),
-    results: getPrimaryResult(row.actions) || 0,
-    conversions: getPrimaryResult(row.actions) || 0,
-  }));
+export const normalizeDailyInsights = (insights, families) =>
+  (insights || []).map((row) => {
+    const results = resultForFamilies(row.actions, families) || 0;
+    return {
+      date: row.date_start,
+      spend: parseNumber(row.spend),
+      impressions: parseNumber(row.impressions),
+      clicks: parseNumber(row.clicks),
+      reach: parseNumber(row.reach),
+      results,
+      conversions: results,
+    };
+  });
 
 // ── Dataset assembly ─────────────────────────────────────────────────────────
 

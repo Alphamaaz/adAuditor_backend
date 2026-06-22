@@ -75,7 +75,41 @@ export const normalizeAds = (rawList) =>
     };
   });
 
-export const buildTikTokNormalizedDataset = ({ campaignRecords, adGroupRecords, adRecords, currency }) => {
+// ── Audience breakdowns → byDimension ────────────────────────────────────────
+
+const normalizeTikTokSegment = (rawList, dimension, dimensionKey) =>
+  (rawList || [])
+    .map((item) => {
+      const d = item.dimensions || {};
+      const m = item.metrics || {};
+      return {
+        dimension,
+        segment: d[dimensionKey] != null ? String(d[dimensionKey]) : "unknown",
+        spend: toNum(m.spend),
+        impressions: toNum(m.impressions),
+        clicks: toNum(m.clicks),
+        conversions: toNum(m.conversion),
+      };
+    })
+    .filter((r) => r.spend > 0 || r.impressions > 0);
+
+/**
+ * Build the byDimension map from raw TikTok audience-report rows keyed by
+ * dimension. Accepts { age, gender, country }. Empty dimensions are omitted so
+ * the engine only sees dimensions with data (mirrors buildGoogleByDimension).
+ */
+export const buildTikTokByDimension = (breakdowns = {}) => {
+  const byDimension = {};
+  const age = normalizeTikTokSegment(breakdowns.age, "age", "age");
+  const gender = normalizeTikTokSegment(breakdowns.gender, "gender", "gender");
+  const country = normalizeTikTokSegment(breakdowns.country, "country", "country_code");
+  if (age.length) byDimension.age = age;
+  if (gender.length) byDimension.gender = gender;
+  if (country.length) byDimension.country = country;
+  return byDimension;
+};
+
+export const buildTikTokNormalizedDataset = ({ campaignRecords, adGroupRecords, adRecords, currency, byDimension = {} }) => {
   const totalSpend = campaignRecords.reduce((sum, c) => sum + c.spend, 0);
   const totalImpressions = campaignRecords.reduce((sum, c) => sum + c.impressions, 0);
   const totalClicks = campaignRecords.reduce((sum, c) => sum + c.clicks, 0);
@@ -90,8 +124,9 @@ export const buildTikTokNormalizedDataset = ({ campaignRecords, adGroupRecords, 
             adgroup: adGroupRecords,
             ad: adRecords,
           },
-          byDimension: {},
-          byDay: {},
+          byDimension: byDimension || {},
+          byDay: [],
+          currency: currency || null,
         },
       },
     },

@@ -10,11 +10,16 @@ const GOOGLE_ADS_VERSION = "v22";
 const GOOGLE_ADS_BASE = `https://googleads.googleapis.com/${GOOGLE_ADS_VERSION}`;
 
 const dateFilter = (dateRange) => {
-  if (dateRange === "LAST_90_DAYS") {
+  // Numeric value: arbitrary lookback window using BETWEEN
+  const days =
+    typeof dateRange === "number" ? dateRange :
+    dateRange === "LAST_90_DAYS" ? 90 :
+    dateRange === "LAST_60_DAYS" ? 60 : null;
+  if (days != null) {
     const fmt = (d) => d.toISOString().split("T")[0];
     const end = new Date();
     const start = new Date();
-    start.setDate(start.getDate() - 90);
+    start.setDate(start.getDate() - days);
     return `segments.date BETWEEN '${fmt(start)}' AND '${fmt(end)}'`;
   }
   return `segments.date DURING ${dateRange}`;
@@ -202,6 +207,10 @@ export const fetchCampaignsWithMetrics = async (accessToken, customerId, dateRan
       campaign.status,
       campaign.advertising_channel_type,
       campaign.bidding_strategy_type,
+      campaign.target_cpa.target_cpa_micros,
+      campaign.maximize_conversions.target_cpa_micros,
+      campaign.target_roas.target_roas,
+      campaign.maximize_conversion_value.target_roas,
       campaign_budget.amount_micros,
       metrics.impressions,
       metrics.clicks,
@@ -212,7 +221,12 @@ export const fetchCampaignsWithMetrics = async (accessToken, customerId, dateRan
       metrics.conversions,
       metrics.cost_per_conversion,
       metrics.all_conversions_value,
-      metrics.view_through_conversions
+      metrics.view_through_conversions,
+      metrics.search_impression_share,
+      metrics.search_budget_lost_impression_share,
+      metrics.search_rank_lost_impression_share,
+      metrics.search_top_impression_share,
+      metrics.search_absolute_top_impression_share
     FROM campaign
     WHERE ${dateFilter(dateRange)}
       AND campaign.status != 'REMOVED'
@@ -222,6 +236,67 @@ export const fetchCampaignsWithMetrics = async (accessToken, customerId, dateRan
   const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
   console.log(`[Google Ads] ✓ Fetched ${results.length} campaign row(s) for ${dateRange}.`);
   return results;
+};
+
+/**
+ * Fetch campaign-level ad extensions (assets) — sitelinks, callouts, structured
+ * snippets, etc. Config only (no metrics), one row per campaign × asset link.
+ * Powers GOOGLE-EXT-001 (missing extension coverage). Best-effort at call site.
+ */
+export const fetchCampaignAssets = async (accessToken, customerId, loginCustomerId = null) => {
+  console.log(`[Google Ads] Fetching campaign assets (extensions) for customer ${customerId}...`);
+  const query = `
+    SELECT
+      campaign.id,
+      campaign.name,
+      campaign.advertising_channel_type,
+      campaign_asset.field_type,
+      campaign_asset.status
+    FROM campaign_asset
+    WHERE campaign.status != 'REMOVED'
+      AND campaign_asset.status != 'REMOVED'
+    LIMIT 10000
+  `;
+  try {
+    const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+    console.log(`[Google Ads] ✓ Fetched ${results.length} campaign asset row(s).`);
+    return results;
+  } catch (err) {
+    console.warn(`[Google Ads] campaign assets unavailable for customer ${customerId}: ${err.message}`);
+    return [];
+  }
+};
+
+/**
+ * Fetch conversion-action configuration (no metrics — config only, so the query
+ * stays valid on every account). Tells us whether the account tracks
+ * conversions at all, which actions are primary (what Smart Bidding optimizes
+ * toward), and what each action measures. Powers GOOGLE-CONV-001
+ * (conversion-tracking health). Best-effort at the call site.
+ */
+export const fetchConversionActions = async (accessToken, customerId, loginCustomerId = null) => {
+  console.log(`[Google Ads] Fetching conversion actions for customer ${customerId}...`);
+  const query = `
+    SELECT
+      conversion_action.id,
+      conversion_action.name,
+      conversion_action.status,
+      conversion_action.type,
+      conversion_action.category,
+      conversion_action.primary_for_goal,
+      conversion_action.counting_type
+    FROM conversion_action
+    WHERE conversion_action.status != 'REMOVED'
+    LIMIT 500
+  `;
+  try {
+    const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+    console.log(`[Google Ads] ✓ Fetched ${results.length} conversion action(s).`);
+    return results;
+  } catch (err) {
+    console.warn(`[Google Ads] conversion actions unavailable for customer ${customerId}: ${err.message}`);
+    return [];
+  }
 };
 
 /**
@@ -265,8 +340,11 @@ export const fetchAdsWithMetrics = async (accessToken, customerId, dateRange = "
       ad_group_ad.ad.id,
       ad_group_ad.ad.name,
       ad_group_ad.ad.type,
+      ad_group_ad.ad_strength,
       ad_group_ad.status,
+      ad_group.id,
       ad_group.name,
+      campaign.id,
       campaign.name,
       metrics.impressions,
       metrics.clicks,
@@ -297,6 +375,9 @@ export const fetchKeywordsWithMetrics = async (accessToken, customerId, dateRang
       ad_group_criterion.keyword.match_type,
       ad_group_criterion.status,
       ad_group_criterion.quality_info.quality_score,
+      ad_group_criterion.quality_info.creative_quality_score,
+      ad_group_criterion.quality_info.post_click_quality_score,
+      ad_group_criterion.quality_info.search_predicted_ctr,
       ad_group_criterion.effective_cpc_bid_micros,
       ad_group.id,
       ad_group.name,
@@ -324,10 +405,9 @@ export const fetchKeywordsWithMetrics = async (accessToken, customerId, dateRang
 
 /**
  * Fetch search term view — the actual queries users typed that triggered ads.
- * Restricted to LAST_30_DAYS, the most actionable window for negative keyword work.
  * Powers KW-003 (high-spend zero-conversion terms).
  */
-export const fetchSearchTerms = async (accessToken, customerId, loginCustomerId = null) => {
+export const fetchSearchTerms = async (accessToken, customerId, loginCustomerId = null, dateRange = "LAST_30_DAYS") => {
   console.log(`[Google Ads] Fetching search terms for customer ${customerId}...`);
   const query = `
     SELECT
@@ -344,7 +424,7 @@ export const fetchSearchTerms = async (accessToken, customerId, loginCustomerId 
       metrics.conversions,
       metrics.cost_per_conversion
     FROM search_term_view
-    WHERE segments.date DURING LAST_30_DAYS
+    WHERE ${dateFilter(dateRange)}
       AND campaign.status != 'REMOVED'
     ORDER BY metrics.cost_micros DESC
     LIMIT 10000
@@ -523,4 +603,246 @@ export const fetchAudienceBidding = async (accessToken, customerId, loginCustome
   const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
   console.log(`[Google Ads] ✓ Fetched ${results.length} audience criterion row(s).`);
   return results;
+};
+
+/**
+ * Fetch per-campaign audience PERFORMANCE (spend, conversions, CPA by audience
+ * segment). Unlike fetchAudienceBidding (bid modifiers only), this carries the
+ * metrics needed to detect a mis-applied audience — the same segment running at
+ * a healthy CPA in one campaign and a catastrophic CPA in another. Reports one
+ * row per campaign × ad group × audience criterion. Powers GOOGLE-AUD-001.
+ *
+ * Conservative SELECT (criterion_id is the cross-campaign join key; no
+ * display_name, which is not reliably selectable from this view) so the query
+ * stays valid across accounts. Best-effort at the call site.
+ */
+export const fetchAudiencePerformance = async (
+  accessToken,
+  customerId,
+  dateRange = "LAST_30_DAYS",
+  loginCustomerId = null
+) => {
+  console.log(`[Google Ads] Fetching audience performance for customer ${customerId} (${dateRange})...`);
+  const query = `
+    SELECT
+      campaign.id,
+      campaign.name,
+      ad_group.id,
+      ad_group.name,
+      ad_group_criterion.criterion_id,
+      ad_group_criterion.type,
+      ad_group_criterion.user_list.user_list,
+      ad_group_criterion.custom_audience.custom_audience,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.cost_micros,
+      metrics.conversions,
+      metrics.conversions_value,
+      metrics.ctr,
+      metrics.average_cpc,
+      metrics.cost_per_conversion
+    FROM ad_group_audience_view
+    WHERE ${dateFilter(dateRange)}
+    ORDER BY metrics.cost_micros DESC
+    LIMIT 5000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} audience performance row(s).`);
+  return results;
+};
+
+/**
+ * Fetch per-campaign DEVICE performance (segments.device FROM campaign — not the
+ * account-level breakdown used by fetchSegmentBreakdowns). Resolves device waste
+ * inside a specific campaign, e.g. desktop generating clicks but zero
+ * conversions. Powers GOOGLE-DEVICE-001.
+ */
+export const fetchCampaignDeviceBreakdown = async (
+  accessToken,
+  customerId,
+  dateRange = "LAST_30_DAYS",
+  loginCustomerId = null
+) => {
+  console.log(`[Google Ads] Fetching campaign×device breakdown for customer ${customerId} (${dateRange})...`);
+  const query = `
+    SELECT
+      campaign.id,
+      campaign.name,
+      segments.device,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM campaign
+    WHERE ${dateFilter(dateRange)}
+      AND campaign.status != 'REMOVED'
+    ORDER BY metrics.cost_micros DESC
+    LIMIT 5000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} campaign×device row(s).`);
+  return results;
+};
+
+/**
+ * Fetch landing-page PERFORMANCE by final URL (landing_page_view). The
+ * unexpanded_final_url is human-readable, so no resolution needed. Powers
+ * GOOGLE-LP-001 (CVR divergence across landing pages / domains).
+ */
+export const fetchLandingPagePerformance = async (
+  accessToken,
+  customerId,
+  dateRange = "LAST_30_DAYS",
+  loginCustomerId = null
+) => {
+  console.log(`[Google Ads] Fetching landing page performance for customer ${customerId} (${dateRange})...`);
+  const query = `
+    SELECT
+      landing_page_view.unexpanded_final_url,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM landing_page_view
+    WHERE ${dateFilter(dateRange)}
+    ORDER BY metrics.cost_micros DESC
+    LIMIT 2000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} landing page row(s).`);
+  return results;
+};
+
+/**
+ * Fetch GEO performance by country (geographic_view). Country comes back as a
+ * numeric geo-target-constant id; resolveGeoTargetNames turns it into a country
+ * name. location_type distinguishes physical presence vs location of interest.
+ * Powers GOOGLE-GEO-001 (spend leaking to under-performing markets).
+ */
+export const fetchGeoPerformance = async (
+  accessToken,
+  customerId,
+  dateRange = "LAST_30_DAYS",
+  loginCustomerId = null
+) => {
+  console.log(`[Google Ads] Fetching geo performance for customer ${customerId} (${dateRange})...`);
+  const query = `
+    SELECT
+      campaign.name,
+      geographic_view.country_criterion_id,
+      geographic_view.location_type,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM geographic_view
+    WHERE ${dateFilter(dateRange)}
+    ORDER BY metrics.cost_micros DESC
+    LIMIT 5000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} geo row(s).`);
+  return results;
+};
+
+/**
+ * Resolve audience criterion resources to readable names. The
+ * ad_group_audience_view does not reliably expose an audience's display name, so
+ * a finding can only show its numeric criterion id ("Custom audience #2488…").
+ * This batches the user-list and custom-audience resources behind those ids into
+ * one lookup each and returns a { resourceName → name } map. Best-effort and
+ * fault-isolated: if either lookup fails the caller falls back to the id label.
+ *
+ * @param {object} resources { userListResources: string[], customAudienceResources: string[] }
+ * @returns {Promise<Record<string,string>>} resourceName → display name
+ */
+export const resolveAudienceNames = async (
+  accessToken,
+  customerId,
+  { userListResources = [], customAudienceResources = [] } = {},
+  loginCustomerId = null
+) => {
+  const map = {};
+  const idOf = (resource) => String(resource || "").split("/").pop();
+
+  const userListIds = [...new Set((userListResources || []).map(idOf).filter(Boolean))];
+  if (userListIds.length) {
+    try {
+      const inList = userListIds.map((id) => `'${id}'`).join(", ");
+      const rows = await searchGoogleAds(
+        accessToken,
+        customerId,
+        `SELECT user_list.id, user_list.name, user_list.resource_name FROM user_list WHERE user_list.id IN (${inList})`,
+        null,
+        loginCustomerId
+      );
+      for (const row of rows) {
+        const name = row.userList?.name;
+        if (name && row.userList?.resourceName) map[row.userList.resourceName] = name;
+      }
+    } catch (err) {
+      console.warn(`[Google Ads] user-list name resolution failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  const customIds = [...new Set((customAudienceResources || []).map(idOf).filter(Boolean))];
+  if (customIds.length) {
+    try {
+      const inList = customIds.map((id) => `'${id}'`).join(", ");
+      const rows = await searchGoogleAds(
+        accessToken,
+        customerId,
+        `SELECT custom_audience.id, custom_audience.name, custom_audience.resource_name FROM custom_audience WHERE custom_audience.id IN (${inList})`,
+        null,
+        loginCustomerId
+      );
+      for (const row of rows) {
+        const name = row.customAudience?.name;
+        if (name && row.customAudience?.resourceName) map[row.customAudience.resourceName] = name;
+      }
+    } catch (err) {
+      console.warn(`[Google Ads] custom-audience name resolution failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  return map;
+};
+
+/**
+ * Resolve geo-target-constant ids (e.g. "2586") to readable country names
+ * (e.g. "Pakistan"). Batched into one GAQL query. Returns a { id → name } map;
+ * unresolved ids are simply absent (the normalizer falls back to the raw id).
+ */
+export const resolveGeoTargetNames = async (
+  accessToken,
+  customerId,
+  ids = [],
+  loginCustomerId = null
+) => {
+  const unique = [...new Set((ids || []).filter((id) => id != null).map(String))];
+  if (unique.length === 0) return {};
+  const inList = unique.map((id) => `'${id}'`).join(", ");
+  const query = `
+    SELECT
+      geo_target_constant.id,
+      geo_target_constant.name,
+      geo_target_constant.country_code
+    FROM geo_target_constant
+    WHERE geo_target_constant.id IN (${inList})
+  `;
+  const rows = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  const map = {};
+  for (const row of rows) {
+    const id = row.geoTargetConstant?.id;
+    if (id != null) {
+      map[String(id)] = {
+        name: row.geoTargetConstant?.name || String(id),
+        countryCode: row.geoTargetConstant?.countryCode || null,
+      };
+    }
+  }
+  return map;
 };

@@ -213,7 +213,7 @@ const normalizeReportOutput = (output, context) => {
     estimatedUpside: primary?.estimatedImpact || null,
     auditFocus: focus,
     rankingBasis:
-      "Findings are ranked by estimated recoverable spend or revenue, then confidence, then ease of implementation.",
+      "Findings are ranked by leverage: severity and root-cause gravity first, then confidence, then recoverable spend or revenue.",
   };
 
   if (!Array.isArray(report.topPriorities) || report.topPriorities.length === 0) {
@@ -386,7 +386,7 @@ const normalizeReportOutput = (output, context) => {
 const buildSystemPrompt = () =>
   `You are a senior paid media strategist and audit writer at Ad Adviser, a professional advertising account audit service. You have personally audited hundreds of ad accounts across Meta, Google Ads, and TikTok for over a decade.
 
-Clients pay for your audit reports because you tell them exactly what is costing them money, using the account's real currency, and exactly what to do about it, ranked by financial impact. Your reports are never generic. Every sentence is grounded in the client's actual data.
+Clients pay for your audit reports because you tell them exactly what is costing them money, using the account's real currency, and exactly what to do about it, ranked by leverage — the highest-impact root cause first, not merely the biggest raw number. Your reports are never generic. Every sentence is grounded in the client's actual data.
 
 WRITING RULES — follow these without exception:
 
@@ -394,7 +394,7 @@ WRITING RULES — follow these without exception:
 
 2. GOAL-REFERENCED FRAMING: Always compare performance against the client's declared goals in businessProfileSnapshot.sectionA. If target CPA exists, state the actual CPA and target CPA using the account currency code. If targetRoas is 4.0 and estimated ROAS is 1.2, write "1.2x estimated ROAS against your 4.0x target." Never describe underperformance without anchoring it to their declared goal.
 
-3. IMPACT RANKING: Rank all priorities strictly by estimated currency waste or revenue impact, not by severity label alone. A large recoverable-spend issue at MEDIUM severity must be ranked above a small issue at CRITICAL. Always explain why a finding is the top priority in financial terms.
+3. LEVERAGE RANKING: Rank priorities by leverage, not raw dollar magnitude. Leverage = severity (which encodes how broken something is — a campaign at 5×+ its target CPA, a tracking failure, a mis-applied audience) weighed against confidence and recoverable spend. A rate-severe CRITICAL on a smaller-spend campaign (e.g. a paused campaign running at 15× the account CPA) leads the report; a larger-dollar but mild MEDIUM (e.g. a day-of-week worth ~3% of spend) does not outrank it. evidencePacket.topFindings is already ordered by this leverage logic — respect that order. Always explain why the lead finding is the top priority in terms of both the broken mechanism and its financial stake.
 
 4. EXPERT TONE: Write for a sophisticated advertiser who manages their own agency or in-house media team. Skip beginner-level explanations. Go straight to the diagnosis, the mechanism, and the action. Use the language of paid media professionals: "ad set learning phase", "broad match bleed", "pixel event mismatch", "CAPI signal loss", "search term irrelevance waste" — not "your ads may not be optimized."
 
@@ -410,7 +410,7 @@ WRITING RULES — follow these without exception:
 
 10. EVIDENCE PACKET IS THE SOURCE OF TRUTH: The supplied context contains an "evidencePacket" object built by deterministic code. It is the authoritative source. Every money figure you cite MUST already appear in evidencePacket (in a finding's evidence/estimatedImpact, in evidencePacket.verifiedNumbers, or in evidencePacket.comparison). You must NOT compute, derive, sum, or estimate any new money amount, percentage, CPA, ROAS, or count. If a number is not in the packet, do not state it. The deterministic code has already done all arithmetic — your job is to explain and prioritize, never to calculate.
 
-11. PRIORITY ORDER: Rank and lead with findings in this order: (a) highest verified financial impact (evidencePacket.topFindings are pre-sorted by estimatedImpactDollars — respect that order), (b) tracking/data-reliability issues (evidencePacket.dataConfidence), (c) segment-waste findings (SEG-WASTE-*), (d) peer-comparison gaps (evidencePacket.comparison.peer), (e) memory regression/improvement (evidencePacket.comparison.selfOverTime).`;
+11. PRIORITY ORDER: Lead with the highest-leverage findings (evidencePacket.topFindings are pre-sorted by leverage: severity → confidence → recoverable dollars — respect that order). Within that, give tracking/data-reliability issues (evidencePacket.dataConfidence) precedence when they undermine every other metric, then root-cause structural findings — a mis-applied audience (GOOGLE-AUD-*) or per-campaign CPA dispersion (CAMP-CPA-*) is a root cause and outranks the symptom; then segment waste (SEG-WASTE-*), then peer-comparison gaps (evidencePacket.comparison.peer), then memory regression/improvement (evidencePacket.comparison.selfOverTime). When a single account-level metric (e.g. blended CPA) masks a wide per-campaign or per-audience spread, lead with the spread and name the specific campaign/audience, never the blended average.`;
 
 const DEEP_REPORTING_RULES = `DEFAULT DEEP AUDIT REQUIREMENTS:
 - Treat this as the main client-facing audit, not a short rule summary.
@@ -418,7 +418,7 @@ const DEEP_REPORTING_RULES = `DEFAULT DEEP AUDIT REQUIREMENTS:
 - For major performance findings, investigate root causes. If high CPA is present, discuss the diagnostic path using only supplied facts: CPM, CTR, conversion rate, peers, benchmarks, segment waste, campaign type, and tracking reliability.
 - Every major finding must include what is happening, why it is happening, evidence, estimated business impact, confidence, recommended actions, and expected outcome after fixing.
 - If auditFocus is supplied, use it only to guide prioritization and wording. Still audit the whole account and surface hidden issues outside that focus.
-- Rank findings by estimated recoverable spend/revenue first, confidence second, and ease of implementation third.
+- Rank findings by leverage: severity/root-cause gravity first, confidence second, recoverable spend/revenue third, ease of implementation fourth. Do not let a large raw number on a mild issue jump ahead of a rate-severe critical one.
 - Report tables are for short data only. Never put prose in a table cell. Evidence values must be short numeric/single-token values, not full sentences.
 - Do not request a bar chart with fewer than 3 rows. Use a gauge or short evidence table instead. Two-row comparison charts are allowed only for explicit A vs B comparisons.
 - Confidence and ease are finding metadata, not callouts. Callouts are only for genuine warnings or wins.
@@ -547,7 +547,7 @@ executiveSummary (2 required, 3rd optional):
 • Para 1: Lead with the health score and what it signals. Quote the total spend reviewed (${formatCurrencyAmount(totals.spend || 0, currency)}). Name the single most expensive problem with its exact monetary waste from the findings — do not bury the lead.
 • Para 2: Connect performance to declared goals only when those exact goal values appear in the evidence packet. If BP-PERF-001 exists in ruleFindings, state the CPA gap only using evidence values. If BP-PERF-002 exists, state the ROAS shortfall only using evidence values. If any BP-TRK findings exist, warn that data reliability is compromised and CPA/ROAS figures cannot be fully trusted until tracking is fixed.${hasPriorAudits ? "\n• Para 3: Reference prior audit data to show whether performance is improving or deteriorating. Quote only the exact metric change already present in evidencePacket.comparison.selfOverTime." : "\n• Para 3 (optional): Prognosis — describe the expected operational improvement without adding any new money amount."}
 
-topPriorities (max 5, ranked by financial impact, not severity label):
+topPriorities (max 5, ranked by leverage — severity/root-cause gravity first, then confidence, then recoverable dollars; follow evidencePacket.topFindings order):
 • Only ruleIds that appear in ruleFindings
 • estimatedImpact: copy the account-currency figure directly from that finding's estimatedImpact field or evidence.wastedSpend / evidence.lossMakingSpend — do not rephrase without numbers
 • recommendedAction: one specific action starting with a verb — "Pause the 3 zero-conversion campaigns identified in STR-009", not "Review campaign performance"

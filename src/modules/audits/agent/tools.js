@@ -35,6 +35,7 @@ import {
   memoryDelta,
 } from "../../../lib/comparison/auditComparison.js";
 import { getBenchmark } from "../auditEngine.service.js";
+import { byLeverageDesc } from "../../../lib/findings/priority.js";
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
@@ -400,8 +401,14 @@ export const createDeepAuditTools = ({ audit, priorAudits = [] } = {}) => {
       : { available: false, reason: "no_benchmark" };
   };
 
+  // Ranked by leverage (severity → confidence → dollars), NOT raw dollars — a
+  // rate-severe CRITICAL on a smaller-spend campaign leads a larger-dollar
+  // MEDIUM. `minImpact` still filters on recoverable dollars when supplied.
   const listFindings = ({ minImpact = 0 } = {}) =>
     (audit?.ruleFindings || [])
+      .filter((f) => parseImpactDollars(f.estimatedImpact) >= num(minImpact))
+      .slice()
+      .sort(byLeverageDesc)
       .map((f) => ({
         ruleId: f.ruleId,
         platform: f.platform,
@@ -410,9 +417,7 @@ export const createDeepAuditTools = ({ audit, priorAudits = [] } = {}) => {
         title: f.title,
         estimatedImpact: f.estimatedImpact,
         estimatedImpactDollars: parseImpactDollars(f.estimatedImpact),
-      }))
-      .filter((f) => f.estimatedImpactDollars >= num(minImpact))
-      .sort((a, b) => b.estimatedImpactDollars - a.estimatedImpactDollars);
+      }));
 
   return {
     getEvidencePacket,

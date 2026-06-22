@@ -3,6 +3,17 @@ import axios from "axios";
 const GRAPH_API_VERSION = "v19.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
 
+// Build the date filter params for a Meta insights call.
+// Accepts a string date_preset ("last_30d", "last_90d", …) for known Meta
+// presets, or a {since, until} object for custom windows (uses time_range).
+const buildDateParams = (dateParam) => {
+  if (typeof dateParam === "string") return { date_preset: dateParam };
+  if (dateParam && typeof dateParam === "object" && dateParam.since) {
+    return { time_range: JSON.stringify(dateParam) };
+  }
+  return { date_preset: "last_30d" };
+};
+
 const APP_ID = () => process.env.META_APP_ID;
 const APP_SECRET = () => process.env.META_APP_SECRET;
 
@@ -72,7 +83,7 @@ export const fetchCampaignInsights = async (accessToken, adAccountId, datePreset
     params: {
       access_token: accessToken,
       level: "campaign",
-      date_preset: datePreset,
+      ...buildDateParams(datePreset),
       fields: [
         "campaign_name",
         "campaign_id",
@@ -80,6 +91,7 @@ export const fetchCampaignInsights = async (accessToken, adAccountId, datePreset
         "spend",
         "impressions",
         "clicks",
+        "inline_link_clicks",
         "reach",
         "frequency",
         "cpm",
@@ -105,7 +117,7 @@ export const fetchAdSetInsights = async (accessToken, adAccountId, datePreset = 
     params: {
       access_token: accessToken,
       level: "adset",
-      date_preset: datePreset,
+      ...buildDateParams(datePreset),
       fields: [
         "campaign_name",
         "adset_name",
@@ -113,6 +125,7 @@ export const fetchAdSetInsights = async (accessToken, adAccountId, datePreset = 
         "spend",
         "impressions",
         "clicks",
+        "inline_link_clicks",
         "reach",
         "frequency",
         "cpm",
@@ -139,7 +152,7 @@ export const fetchAdInsights = async (accessToken, adAccountId, datePreset = "la
     params: {
       access_token: accessToken,
       level: "ad",
-      date_preset: datePreset,
+      ...buildDateParams(datePreset),
       fields: [
         "campaign_name",
         "adset_name",
@@ -148,6 +161,7 @@ export const fetchAdInsights = async (accessToken, adAccountId, datePreset = "la
         "spend",
         "impressions",
         "clicks",
+        "inline_link_clicks",
         "reach",
         "frequency",
         "ctr",
@@ -190,6 +204,10 @@ export const META_BREAKDOWNS = {
     field: "hourly_stats_aggregated_by_advertiser_time_zone",
   },
   region: { param: "region", field: "region" },
+  // Country split — the dimension that exposes a geo misconfiguration (a campaign
+  // delivering to the wrong country at a runaway CPM, the classic zero-conversion
+  // root cause). Powers META-GEO-001.
+  country: { param: "country", field: "country" },
 };
 
 /**
@@ -210,7 +228,7 @@ export const fetchBreakdownInsights = async (
     params: {
       access_token: accessToken,
       level: "account",
-      date_preset: datePreset,
+      ...buildDateParams(datePreset),
       breakdowns: cfg.param,
       fields: BREAKDOWN_FIELDS,
       limit: 500,
@@ -231,7 +249,7 @@ export const fetchDailyInsights = async (
     params: {
       access_token: accessToken,
       level: "account",
-      date_preset: datePreset,
+      ...buildDateParams(datePreset),
       time_increment: 1,
       fields: BREAKDOWN_FIELDS,
       limit: 500,
@@ -275,7 +293,11 @@ export const fetchAds = async (accessToken, adAccountId) => {
   const { data } = await axios.get(`${GRAPH_BASE}/${adAccountId}/ads`, {
     params: {
       access_token: accessToken,
-      fields: "name,status,effective_status,adset_id,adset{name},campaign_id,campaign{name}",
+      // `effective_status` exposes DISAPPROVED / WITH_ISSUES (the policy block
+      // that can gate most of an account's delivery); `ad_review_feedback`
+      // carries the specific policy reason for the narrative.
+      fields:
+        "name,status,effective_status,ad_review_feedback,adset_id,adset{name},campaign_id,campaign{name}",
       limit: 500,
     },
   });

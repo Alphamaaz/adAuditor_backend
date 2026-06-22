@@ -109,6 +109,7 @@ model User {
   impersonatedSessions     ImpersonationSession[] @relation("ImpersonationTarget")
   authSessions             AuthSession[]
   verificationTokens       VerificationToken[]
+  assignedAdAccounts       AdAccount[]            @relation("AdAccountAssignee")
 
   @@index([status])
   @@index([internalRole])
@@ -150,6 +151,7 @@ model Organization {
   id                     String                 @id @default(uuid())
   name                   String
   ownerId                String
+  brandingSettings       Json?
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt
 
@@ -171,6 +173,7 @@ model OrganizationMember {
   userId         String
   organizationId String
   role           OrganizationRole @default(OWNER)
+  alertsEnabled  Boolean          @default(true)
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
@@ -271,16 +274,21 @@ model AdAccount {
   organizationId String
   name           String
   platform       Platform
-  externalId     String?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  externalId       String?
+  assignedUserId   String?
+  monitoringEnabled Boolean    @default(false)
+  lastAutoAuditAt   DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
 
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  assignedUser   User?        @relation("AdAccountAssignee", fields: [assignedUserId], references: [id], onDelete: SetNull)
   connections    PlatformConnection[]
   audits         Audit[]
 
   @@index([organizationId, platform])
   @@index([externalId])
+  @@index([assignedUserId])
 }
 
 model PlatformConnection {

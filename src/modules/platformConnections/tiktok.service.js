@@ -51,7 +51,7 @@ const getDateRange = (daysBack) => {
 
 // ── Generic paginated report fetcher ──────────────────────────────────────────
 
-const fetchReport = async (accessToken, advertiserId, dataLevel, dimensions, metrics, startDate, endDate) => {
+const fetchReport = async (accessToken, advertiserId, dataLevel, dimensions, metrics, startDate, endDate, reportType = "BASIC") => {
   const allItems = [];
   let page = 1;
 
@@ -60,7 +60,7 @@ const fetchReport = async (accessToken, advertiserId, dataLevel, dimensions, met
       headers: { "Access-Token": accessToken },
       params: {
         advertiser_id: advertiserId,
-        report_type: "BASIC",
+        report_type: reportType,
         data_level: dataLevel,
         dimensions: JSON.stringify(dimensions),
         metrics: JSON.stringify(metrics),
@@ -156,4 +156,46 @@ export const fetchAdReport = async (accessToken, advertiserId, daysBack = 30) =>
     accessToken, advertiserId, "AUCTION_AD",
     ["ad_id", "adgroup_id", "campaign_id"], AD_METRICS, start_date, end_date
   );
+};
+
+// Audience-breakdown reports (report_type=AUDIENCE) carry one row per segment
+// value with metrics — the TikTok analog of Meta age/gender/placement and Google
+// device/network breakdowns. Powers SEG-WASTE-001 + the Deep Audit segment tool
+// for TikTok (byDimension was empty before this).
+const AUDIENCE_METRICS = ["spend", "impressions", "clicks", "conversion"];
+
+/**
+ * Fetch an account-level audience breakdown for one dimension (e.g. "age",
+ * "gender", "country_code"). Best-effort at the call site.
+ */
+export const fetchAudienceReport = async (accessToken, advertiserId, dimension, daysBack = 30) => {
+  const { start_date, end_date } = getDateRange(daysBack);
+  return fetchReport(
+    accessToken, advertiserId, "AUCTION_ADVERTISER",
+    ["advertiser_id", dimension], AUDIENCE_METRICS, start_date, end_date, "AUDIENCE"
+  );
+};
+
+/**
+ * Fetch the standard audience breakdowns (age, gender, country). Best-effort per
+ * dimension — a failure on one returns [] for that dimension and never throws,
+ * so a single unsupported breakdown can't fail the whole sync.
+ */
+export const fetchAudienceBreakdowns = async (accessToken, advertiserId, daysBack = 30) => {
+  const dims = [
+    { key: "age", dimension: "age" },
+    { key: "gender", dimension: "gender" },
+    { key: "country", dimension: "country_code" },
+  ];
+  const out = {};
+  for (const { key, dimension } of dims) {
+    try {
+      out[key] = await fetchAudienceReport(accessToken, advertiserId, dimension, daysBack);
+      console.log(`[TikTok Ads] ✓ Fetched ${out[key].length} '${key}' audience row(s).`);
+    } catch (err) {
+      console.warn(`[TikTok Ads] audience breakdown '${key}' unavailable: ${err.message}`);
+      out[key] = [];
+    }
+  }
+  return out;
 };

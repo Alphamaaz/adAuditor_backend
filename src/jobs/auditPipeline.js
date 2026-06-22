@@ -11,6 +11,7 @@ import {
   validateRecommendationsNotGeneric,
 } from "../modules/audits/aiReportValidation.service.js";
 import { generateAuditPdfFile } from "../modules/audits/pdfReport.service.js";
+import { fetchPreviousAudit } from "../modules/audits/auditHistory.service.js";
 import {
   recordAuditRun,
   resolveEffectivePlan,
@@ -96,6 +97,7 @@ const fullAuditInclude = {
   ruleFindings: { orderBy: { createdAt: "desc" } },
   aiReport: true,
   pdfReports: { orderBy: { version: "desc" } },
+  organization: { select: { brandingSettings: true } },
 };
 
 const loadAudit = (auditId) =>
@@ -642,10 +644,27 @@ export const processGeneratePdfReport = async ({ auditId }) => {
 
   const uploadReadiness = calculateUploadReadiness(audit);
   const version = (audit.pdfReports[0]?.version || 0) + 1;
+  const branding = audit.organization?.brandingSettings || {};
+
+  // Continuity: the prior audit for this account powers the "Since your last
+  // audit" trend section. Best-effort — never block PDF generation on it.
+  let previousAudit = null;
+  try {
+    previousAudit = await fetchPreviousAudit({
+      organizationId: audit.organizationId,
+      adAccountId: audit.adAccountId,
+      platforms: audit.selectedPlatforms,
+      beforeCompletedAt: audit.completedAt,
+      excludeAuditId: audit.id,
+    });
+  } catch (trendErr) {
+    console.warn(`[auditPipeline] previous-audit lookup failed (non-fatal): ${trendErr.message}`);
+  }
 
   const generatedPdf = await generateAuditPdfFile({
-    audit: { ...audit, uploadReadiness },
+    audit: { ...audit, uploadReadiness, previousAudit },
     version,
+    branding,
   });
 
   const pdfReport = await prisma.pdfReport.create({

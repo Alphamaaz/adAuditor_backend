@@ -8,7 +8,8 @@
  *
  * Design rules:
  *   - No raw row data.
- *   - Findings sorted by dollar impact (parsed from estimatedImpact), then severity.
+ *   - Findings ranked by leverage: severity first, then confidence, then dollar
+ *     impact within a severity band (see lib/findings/priority.js).
  *   - Evidence fields carried through verbatim so the model can cite real numbers.
  *   - A flat `verifiedNumbers` set of dollar magnitudes for the fact-check pass.
  */
@@ -18,8 +19,7 @@ import {
   normalizeSnapshotFromMemory,
   buildComparisonFacts,
 } from "../../lib/comparison/auditComparison.js";
-
-const SEVERITY_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+import { byLeverageDesc } from "../../lib/findings/priority.js";
 
 const MAX_FINDINGS = 25;
 const MAX_PRIOR_AUDITS = 3;
@@ -148,13 +148,14 @@ export const buildEvidencePacket = (audit, { priorAudits = [] } = {}) => {
   const summary = audit.normalizedDataset?.summary || null;
   const businessProfile = audit.businessProfileSnapshot || null;
 
+  // Leverage ranking: severity → confidence → dollars. A rate-severe CRITICAL
+  // on a smaller-spend campaign must lead a larger-dollar MEDIUM, not trail it.
   const sortedFindings = [...findings].sort((a, b) => {
-    const dollarDelta =
-      parseImpactDollars(b.estimatedImpact) -
-      parseImpactDollars(a.estimatedImpact);
-    if (dollarDelta !== 0) return dollarDelta;
+    const lev = byLeverageDesc(a, b);
+    if (lev !== 0) return lev;
     return (
-      (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0)
+      parseImpactDollars(b.estimatedImpact) -
+      parseImpactDollars(a.estimatedImpact)
     );
   });
 

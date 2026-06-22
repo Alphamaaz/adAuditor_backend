@@ -30,6 +30,7 @@ import { getDriver } from "../../queues/jobQueue.js";
 import {
   fetchAuditComparison,
   fetchAuditTrend,
+  fetchPreviousAudit,
 } from "./auditHistory.service.js";
 import { isDeepAuditEnabled } from "./agent/config.js";
 import { runDeepAuditForAudit } from "./agent/deepAudit.service.js";
@@ -66,6 +67,8 @@ const buildSnapshotFromContext = (existingAnswers, context) => {
     "targetCpa",
     "targetRoas",
     "brandTerms",
+    "currency",
+    "lookbackDays",
   ]) {
     if (ctx[key] !== undefined && ctx[key] !== null && ctx[key] !== "") {
       overlay[key] = ctx[key];
@@ -326,6 +329,7 @@ export const getAuditPremiumReportHtml = async (req, res) => {
     include: {
       adAccount: true,
       intakeResponses: true,
+      organization: { select: { brandingSettings: true } },
       uploadedFiles: {
         orderBy: {
           createdAt: "desc",
@@ -350,10 +354,26 @@ export const getAuditPremiumReportHtml = async (req, res) => {
     throw notFound("Audit not found");
   }
 
+  // Attach the prior audit for the "Since your last audit" trend section.
+  // Best-effort — the report renders fine without it (first audit / lookup fail).
+  let previousAudit = null;
+  try {
+    previousAudit = await fetchPreviousAudit({
+      organizationId,
+      adAccountId: audit.adAccountId,
+      platforms: audit.selectedPlatforms,
+      beforeCompletedAt: audit.completedAt,
+      excludeAuditId: audit.id,
+    });
+  } catch {
+    previousAudit = null;
+  }
+
+  const branding = audit.organization?.brandingSettings || {};
   res
     .status(200)
     .type("html")
-    .send(renderAuditPremiumReportHtml({ ...audit, uploadReadiness: calculateUploadReadiness(audit) }));
+    .send(renderAuditPremiumReportHtml({ ...audit, uploadReadiness: calculateUploadReadiness(audit), previousAudit }, branding));
 };
 
 export const generatePdfReport = async (req, res) => {

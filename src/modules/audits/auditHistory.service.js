@@ -74,6 +74,54 @@ export const fetchAuditTrend = async ({
     });
 };
 
+/**
+ * The single most-recent COMPLETED audit for the same account BEFORE the given
+ * one — the baseline for the report's "Since your last audit" trend section.
+ * Matches by ad account when available (the stable identity), else falls back to
+ * same org + overlapping platform (covers single-account orgs and CSV audits
+ * with no linked account). Returns a lightweight shape with everything the trend
+ * diff needs, or null on a first audit.
+ */
+export const fetchPreviousAudit = async ({
+  organizationId,
+  adAccountId,
+  platforms = [],
+  beforeCompletedAt,
+  excludeAuditId,
+}) => {
+  if (!organizationId) return null;
+  const where = {
+    organizationId,
+    status: "COMPLETED",
+    completedAt: beforeCompletedAt ? { lt: new Date(beforeCompletedAt) } : { not: null },
+    ...(excludeAuditId ? { id: { not: excludeAuditId } } : {}),
+    ...(adAccountId
+      ? { adAccountId }
+      : platforms.length
+        ? { selectedPlatforms: { hasSome: platforms } }
+        : {}),
+  };
+  const prev = await prisma.audit.findFirst({
+    where,
+    orderBy: { completedAt: "desc" },
+    select: {
+      id: true,
+      healthScore: true,
+      completedAt: true,
+      normalizedDataset: { select: { summary: true } },
+      ruleFindings: { select: { ruleId: true, title: true, severity: true, estimatedImpact: true, evidence: true } },
+    },
+  });
+  if (!prev) return null;
+  return {
+    auditId: prev.id,
+    healthScore: prev.healthScore,
+    completedAt: prev.completedAt,
+    totals: prev.normalizedDataset?.summary?.totals || {},
+    findings: prev.ruleFindings || [],
+  };
+};
+
 const safeNumber = (value) =>
   Number.isFinite(Number(value)) ? Number(value) : null;
 

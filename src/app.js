@@ -16,6 +16,7 @@ import businessProfileRoutes from "./modules/businessProfile/businessProfile.rou
 import auditRoutes from "./modules/audits/audit.routes.js";
 import adminRoutes from "./modules/admin/admin.routes.js";
 import platformConnectionRoutes from "./modules/platformConnections/platformConnections.routes.js";
+import organizationRoutes from "./modules/organizations/organizations.routes.js";
 import {
   adminPlanRoutes,
   meRoutes as planMeRoutes,
@@ -25,6 +26,8 @@ import billingRoutes from "./modules/billing/billing.routes.js";
 import { handleStripeWebhook } from "./modules/billing/billing.webhooks.js";
 import { initializeAuditQueueProcessors } from "./queues/auditQueue.js";
 import { startStuckAuditCron } from "./jobs/stuckAuditReconciliation.js";
+import { startWeeklyDigestCron } from "./jobs/digestPipeline.js";
+import { startReauditCron } from "./jobs/reauditPipeline.js";
 
 // Wire up job processors. In inline mode this registers in-process handlers;
 // in Bull mode the worker process attaches its own — but the API still needs
@@ -34,6 +37,14 @@ initializeAuditQueueProcessors();
 // Periodic reconciliation of audits left in PROCESSING (e.g. inline-mode
 // crash, dead worker). Runs every STUCK_AUDIT_RECONCILE_INTERVAL_MS.
 startStuckAuditCron();
+
+// Daily scan that emails the weekly "since your last audit" digest to routed
+// recipients. A per-account cooldown keeps the real cadence weekly.
+startWeeklyDigestCron();
+
+// Scheduled auto re-audit of monitored accounts. No-op unless
+// AUTO_REAUDIT_ENABLED — inert by default so it never auto-consumes plan quota.
+startReauditCron();
 
 const app = express();
 app.set("trust proxy", 1);
@@ -131,6 +142,7 @@ app.use("/api/business-profile", businessProfileRoutes);
 app.use("/api/audits", auditRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/platform-connections", platformConnectionRoutes);
+app.use("/api/organizations", organizationRoutes);
 app.use("/api/plans", publicPlanRoutes);
 app.use("/api/billing", planMeRoutes);
 app.use("/api/billing", billingRoutes);

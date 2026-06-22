@@ -36,6 +36,12 @@ export const auditContextSchema = z
     // Comma/space separated brand terms or company name. Drives the Google
     // brand-separation + cross-platform cannibalization rules.
     brandTerms: z.string().trim().max(300).nullable().optional(),
+    // ISO 4217 currency code for all monetary intake fields (budget, CPA, etc.)
+    currency: z.string().trim().max(10).nullable().optional(),
+    // How many calendar days of platform data to pull (default 30). Stored in
+    // businessProfileSnapshot so fetch-data controllers can read it without a
+    // separate request parameter.
+    lookbackDays: z.number().int().min(1).max(365).nullable().optional(),
   })
   .optional();
 
