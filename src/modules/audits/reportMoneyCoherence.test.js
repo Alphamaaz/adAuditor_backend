@@ -94,4 +94,14 @@ describe("report money coherence", () => {
       expect(moneyMagnitude(row.display)).toBeLessThanOrEqual(recoverable);
     }
   });
+
+  it("keeps the SUM of money-map line items at or below the headline (no double-count)", () => {
+    // The real failure mode: each bar was fine alone, but they summed to 60-141%
+    // of spend because overlapping slices of the same spend each printed their own
+    // dollar. The body must reconcile with the headline, not exceed it.
+    const moneyMap = doc.sections.find((s) => s.id === "money-map");
+    if (!moneyMap) return;
+    const sum = moneyMap.blocks[0].rows.reduce((s, r) => s + moneyMagnitude(r.display), 0);
+    expect(sum).toBeLessThanOrEqual(recoverable + 1);
+  });
 });

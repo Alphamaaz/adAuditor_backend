@@ -1,5 +1,6 @@
 import { byLeverageDesc } from "../../lib/findings/priority.js";
 import { reconcileRecoverable } from "../../lib/findings/recoverable.js";
+import { parseMoney } from "../../lib/money.js";
 import { getBenchmark } from "./auditEngine.service.js";
 
 const platformDocLabels = {
@@ -39,13 +40,23 @@ const num = (value) => {
 // Real currency codes only — NOT a loose case-insensitive `[A-Z]{3}`, which
 // matched any 3-letter word before a number ("from 21%" → a phantom "21"),
 // pulling rate-only findings into the money map.
-const MONEY_RX =
-  /(?:\$|USD|EUR|GBP|PKR|INR|AED|SAR|CAD|AUD|SGD|MYR|EGP|NGN|BRL|MXN|TRY|ZAR|QAR|KWD|THB|PHP|IDR|BDT|LKR|NPR|JPY|CNY|HKD|NZD|CHF)\s?([\d,]+(?:\.\d+)?)/;
+// Shared global currency vocabulary — see src/lib/money.js. Kept as a thin
+// wrapper so the report parses money identically to the engine + trust layer.
 const moneyMagnitude = (value) => {
   if (value === null || value === undefined) return 0;
-  const text = typeof value === "string" ? value : JSON.stringify(value);
-  const match = text.match(MONEY_RX);
-  return match ? Number(match[1].replace(/,/g, "")) || 0 : 0;
+  return parseMoney(value);
+};
+
+// The recoverable dollars attributable to ONE finding. Once a finding has passed
+// through the trust layer it carries an authored, non-overlapping
+// `evidence.netRecoverable` — prefer it so the money-map bars and per-finding
+// labels show the same figures that sum to the headline (overlapping "secondary"
+// findings net to 0 and drop out). Findings that never went through the trust
+// layer (legacy/synthetic) fall back to parsing the estimatedImpact text.
+const findingRecoverable = (finding) => {
+  const net = finding?.evidence?.netRecoverable;
+  if (Number.isFinite(net)) return net;
+  return moneyMagnitude(finding?.estimatedImpact || finding?.evidence);
 };
 
 const formatMoney = (value, currency = "USD") => {
@@ -61,11 +72,19 @@ const isDiagnostic = (finding) => finding?.evidence?.diagnostic === true;
 
 const impactLabel = (finding, currency = "USD") => {
   if (isDiagnostic(finding)) return "Optimization";
-  const amount = moneyMagnitude(finding.estimatedImpact || finding.evidence);
+  // A delivery block is restorable upside, not recovered waste — label it
+  // distinctly so it never reads as part of the "recoverable" total. (Its money
+  // lives in the estimatedImpact text, not in netRecoverable.)
+  if (finding.evidence?.blocksDelivery === true) {
+    const blocked = moneyMagnitude(finding.estimatedImpact || finding.evidence);
+    if (blocked > 0) return `${formatMoney(blocked, currency)} blocked`;
+  }
+  // An overlapping ("secondary") finding is the same spend already counted by the
+  // primary finding — never show it as additional recoverable money.
+  if (finding.evidence?.trust?.role === "secondary") return "Same spend (counted above)";
+  if (finding.evidence?.trust?.verdict === "DIRECTIONAL") return "Directional — verify";
+  const amount = findingRecoverable(finding);
   if (amount > 0) {
-    // A delivery block is restorable upside, not recovered waste — label it
-    // distinctly so it never reads as part of the "recoverable" total.
-    if (finding.evidence?.blocksDelivery === true) return `${formatMoney(amount, currency)} blocked`;
     return `${formatMoney(amount, currency)} recoverable`;
   }
   const text = String(finding.estimatedImpact || "").trim();
@@ -1110,7 +1129,7 @@ export const buildReportDocumentFromAudit = (audit) => {
   const isRecoverableWaste = (f) =>
     f.evidence?.blocksDelivery !== true &&
     f.evidence?.diagnostic !== true &&
-    moneyMagnitude(f.estimatedImpact || f.evidence) > 0;
+    findingRecoverable(f) > 0;
   const quantified = findings.filter(isRecoverableWaste);
   // Overlap-aware total: the same wasted spend surfaces as several findings
   // (campaign + audience + device + geo on one campaign). Count each dollar once
@@ -1157,7 +1176,7 @@ export const buildReportDocumentFromAudit = (audit) => {
 
   if (quantified.length > 0) {
     const maxImpact = Math.max(
-      ...quantified.map((f) => moneyMagnitude(f.estimatedImpact || f.evidence)),
+      ...quantified.map((f) => findingRecoverable(f)),
       1
     );
     sections.push({
@@ -1169,7 +1188,7 @@ export const buildReportDocumentFromAudit = (audit) => {
         {
           type: "bar_chart_h",
           rows: quantified.slice(0, 6).map((f) => {
-            const value = moneyMagnitude(f.estimatedImpact || f.evidence);
+            const value = findingRecoverable(f);
             return {
               label: f.title,
               value,

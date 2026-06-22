@@ -10,6 +10,7 @@ import {
 import { diagnoseCpaDriver } from "../../lib/kpi/decomposition.js";
 import { byLeverageDesc } from "../../lib/findings/priority.js";
 import { collapseOverlappingFindings } from "../../lib/findings/dedupe.js";
+import { applyTrustLayer } from "../../lib/findings/trustLayer.js";
 
 const SEVERITY_PENALTIES = {
   CRITICAL: 25,
@@ -4708,7 +4709,13 @@ export const runDeterministicAudit = (audit) => {
   // Collapse cross-level dispersion duplicates (e.g. a campaign and its lone ad
   // set surfacing the same waste) before scoring — so a duplicate CRITICAL does
   // not double-count in the density penalty or the presented list.
-  const finalFindings = collapseOverlappingFindings(findings);
+  const collapsed = collapseOverlappingFindings(findings);
+
+  // Trust layer — ONE general gate every finding passes through before it may
+  // assert a recoverable number: drops attribution artifacts / implausible CPAs,
+  // hedges thin-sample findings, and assigns each a non-overlapping
+  // `evidence.netRecoverable` so the report body can never sum past the headline.
+  const finalFindings = applyTrustLayer({ findings: collapsed, dataset });
 
   const scores = calculateScores({ audit, findings: finalFindings });
   const report = buildDeterministicSummary({ audit, dataset, findings: finalFindings, scores });

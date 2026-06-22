@@ -19,23 +19,18 @@
  * Deep Audit tool layer all rank findings identically.
  */
 
-const SEVERITY_WEIGHT = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+import { parseMoney } from "../money.js";
 
-// Same currency coverage as the evidence packet / Deep Audit tools.
-const MONEY_RX =
-  /(?:\$|USD|PKR|EUR|GBP|CAD|AUD|AED|INR|SAR|QAR|KWD|SGD|MYR|THB|PHP|IDR|BDT|LKR|NPR|ZAR)\s?([\d,]+(?:\.\d+)?)/;
+const SEVERITY_WEIGHT = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
 
 /**
  * Parse the leading money magnitude from an estimatedImpact string.
- * "PKR 4,280 in waste…" → 4280. Returns 0 when none is present.
+ * "PKR 4,280 in waste…" → 4280. Returns 0 when none is present. Currency
+ * coverage comes from the shared `money.js` vocabulary (global markets), so it
+ * can never drift from the report / trust-layer parsers.
  */
-export const parseImpactDollars = (impact) => {
-  if (typeof impact !== "string") return 0;
-  const match = impact.match(MONEY_RX);
-  if (!match) return 0;
-  const n = Number(match[1].replace(/,/g, ""));
-  return Number.isFinite(n) ? n : 0;
-};
+export const parseImpactDollars = (impact) =>
+  typeof impact === "string" ? parseMoney(impact) : 0;
 
 /**
  * Is this finding's evidence flagged as thin / not statistically significant?

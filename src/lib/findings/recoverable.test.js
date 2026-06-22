@@ -1,5 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { reconcileRecoverable } from "./recoverable.js";
+import { reconcileRecoverable, geoMatchesEntity, COUNTRY_TOKENS } from "./recoverable.js";
+
+describe("COUNTRY_TOKENS — global geo→campaign matching", () => {
+  it("matches campaigns named by code or full name across global markets", () => {
+    expect(geoMatchesEntity("Japan", "Search | JP | Brand")).toBe(true);
+    expect(geoMatchesEntity("South Korea", "Korea Prospecting")).toBe(true);
+    expect(geoMatchesEntity("Germany", "DE | Performance Max")).toBe(true);
+    expect(geoMatchesEntity("Brazil", "Display BRA Retargeting")).toBe(true);
+    expect(geoMatchesEntity("United Arab Emirates", "UAE Lead Gen")).toBe(true);
+    expect(geoMatchesEntity("Vietnam", "VN Awareness")).toBe(true);
+  });
+
+  it("does NOT match prose via the omitted ambiguous 2-letter codes", () => {
+    // "no"/"is"/"it"/"be"/"at"/"co"/"per" are intentionally absent so campaign
+    // names with those words don't falsely merge a geo finding.
+    expect(geoMatchesEntity("Norway", "Best in class campaign")).toBe(false);
+    expect(geoMatchesEntity("Italy", "Always on retargeting")).toBe(false);
+    expect(geoMatchesEntity("Colombia", "Company brand search")).toBe(false);
+    expect(geoMatchesEntity("Peru", "Cost per result test")).toBe(false);
+  });
+
+  it("keeps the full country name as a fallback token for every entry", () => {
+    for (const [country, tokens] of Object.entries(COUNTRY_TOKENS)) {
+      expect(tokens.some((t) => country.includes(t) || t.includes(country.split(" ")[0]))).toBe(true);
+    }
+  });
+});
 
 /**
  * The financoach overlap: one broken campaign surfaces as geo + campaign +
@@ -62,7 +88,7 @@ describe("reconcileRecoverable", () => {
       { ruleId: "CAMP-CPA-001", estimatedImpact: "$70,000 recoverable", evidence: { worstEntity: "B" } },
     ];
     const { total, capped } = reconcileRecoverable(findings, { accountSpend: 100000 });
-    expect(total).toBe(60000); // 60% cap
+    expect(total).toBe(50000); // 50% defensive cap (RECOVERABLE_CAP_FRACTION)
     expect(capped).toBe(true);
   });
 
@@ -89,6 +115,52 @@ describe("reconcileRecoverable", () => {
     const { total } = reconcileRecoverable(findings, { accountSpend: 500000 });
     // max(campaign 50k, placement 40k) = 50k, + Thursday 9k (distinct lever) = 59k.
     expect(total).toBe(59000);
+  });
+
+  it("merges a device finding on the 2nd-worst campaign of a dispersion (report-23 overlap)", () => {
+    // CAMP-CPA's PKR 12,939 already counts the excess of BOTH outlier campaigns
+    // (6/8 and 6/16). A device leak on 6/16 is a subset of that — it must NOT add
+    // on top (before the covered-campaigns fix it double-counted PKR 370).
+    const findings = [
+      {
+        ruleId: "CAMP-CPA-001",
+        estimatedImpact: "PKR 12,939 is recoverable by bringing these 2 campaigns toward baseline",
+        evidence: {
+          worstEntity: "Display | PK | 6/8",
+          outlierCount: 2,
+          entityBreakdown: [
+            { entity: "Display | PK | 6/8", spend: 9781, mult: 9.1 },
+            { entity: "PK Display 6/16", spend: 7711, mult: 2.2 },
+            { entity: "Display | BD | 6/6", spend: 24638, mult: 0.6 },
+          ],
+        },
+      },
+      { ruleId: "GOOGLE-DEVICE-001", estimatedImpact: "PKR 370 is recoverable", evidence: { campaign: "PK Display 6/16" } },
+    ];
+    const { total } = reconcileRecoverable(findings, { accountSpend: 90125 });
+    expect(total).toBe(12939); // not 13,309 — the device leak is inside the pool
+  });
+
+  it("still counts a device finding on a HEALTHY (non-outlier) campaign separately", () => {
+    // A device leak on a campaign NOT in the dispersion's counted excess is real
+    // additional waste — it must stay additive.
+    const findings = [
+      {
+        ruleId: "CAMP-CPA-001",
+        estimatedImpact: "PKR 10,000 is recoverable",
+        evidence: {
+          worstEntity: "Display | PK | 6/8",
+          outlierCount: 1,
+          entityBreakdown: [
+            { entity: "Display | PK | 6/8", spend: 9781, mult: 9.1 },
+            { entity: "Healthy Brand", spend: 24638, mult: 0.6 },
+          ],
+        },
+      },
+      { ruleId: "GOOGLE-DEVICE-001", estimatedImpact: "PKR 500 is recoverable", evidence: { campaign: "Healthy Brand" } },
+    ];
+    const { total } = reconcileRecoverable(findings, { accountSpend: 90125 });
+    expect(total).toBe(10500); // 10,000 + 500 (different, non-overlapping spend)
   });
 
   it("returns 0 for no quantified findings", () => {
