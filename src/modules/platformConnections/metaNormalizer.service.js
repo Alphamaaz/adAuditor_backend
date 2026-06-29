@@ -16,10 +16,15 @@ import {
   resolveAccountFamilies,
   resultForFamilies,
 } from "./metaResults.service.js";
+// Ad-set → campaign result reconciliation now lives in lib/ so the engine can
+// re-apply it at audit-run time (audit runs reuse the stored dataset and never
+// re-pull). Imported here for the pull path; re-exported for existing tests.
+import { reconcileCampaignResultsFromAdSets } from "../../lib/normalize/metaResultReconcile.js";
 
 // Re-exported so the controller resolves account-level result families from the
 // same place it imports the normalizers.
 export { resolveAccountFamilies } from "./metaResults.service.js";
+export { reconcileCampaignResultsFromAdSets };
 
 const parseNumber = (value) => {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -100,6 +105,39 @@ export const enrichCampaignsWithStructure = (insightRecords, structureRecords) =
       objective: struct.objective || record.objective,
     };
   });
+};
+
+/**
+ * Campaigns that exist in the account structure but produced no insight row for
+ * the window (zero delivery — paused/archived before they spent, or never
+ * activated). The insights endpoint silently omits these, so they were invisible
+ * to the audit; a thorough audit should still see the clutter.
+ *
+ * Returned as a SEPARATE list — never merged into the spending campaign set —
+ * so these zero-metric shells can never contaminate a baseline, CTR/CPM figure,
+ * or anomaly check. They carry zeroed metrics and `neverDelivered: true` purely
+ * for the structural-hygiene rule that counts them.
+ */
+export const normalizeStructureOnlyCampaigns = (structureRecords, insightRecords) => {
+  const delivered = new Set((insightRecords || []).map((r) => r.name));
+  return (structureRecords || [])
+    .filter((c) => c && c.name && !delivered.has(c.name))
+    .map((c) => ({
+      level: "campaign",
+      name: c.name,
+      status: c.effective_status || c.status || null,
+      objective: c.objective || null,
+      budget: parseNumber(c.daily_budget || c.lifetime_budget),
+      bidStrategy: c.bid_strategy || null,
+      spend: 0,
+      impressions: 0,
+      clicks: 0,
+      reach: 0,
+      results: 0,
+      resultFamily: null,
+      cpa: null,
+      neverDelivered: true,
+    }));
 };
 
 // ── Ad set-level ────────────────────────────────────────────────────────────
@@ -275,6 +313,10 @@ export const buildMetaNormalizedDataset = ({
   byDimension = {},
   byDay = [],
 }) => {
+  // Let the precise ad-set optimisation goal correct the campaign's result family
+  // (the messaging-as-leads undercount) before anything reads campaign results.
+  campaignRecords = reconcileCampaignResultsFromAdSets(campaignRecords, adSetRecords);
+
   const allRecords = [...campaignRecords, ...adSetRecords, ...adRecords];
 
   const byLevel = {

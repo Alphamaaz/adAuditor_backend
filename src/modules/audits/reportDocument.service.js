@@ -1,7 +1,45 @@
 import { byLeverageDesc } from "../../lib/findings/priority.js";
 import { reconcileRecoverable } from "../../lib/findings/recoverable.js";
 import { parseMoney } from "../../lib/money.js";
-import { getBenchmark } from "./auditEngine.service.js";
+import {
+  detectConversionAnomalies,
+  normName,
+} from "../../lib/findings/conversionAnomaly.js";
+import {
+  buildCohortBaselines,
+  cohortBaselineFor,
+} from "../../lib/segments/cohortBaseline.js";
+import { getBenchmark, resolveBusinessType } from "./auditEngine.service.js";
+
+/**
+ * Account baseline + tracking-anomaly set, computed independently of the engine
+ * so the report is correct even when rendered from persisted data. When a
+ * campaign reports conversions too cheap to be genuine (e.g. WhatsApp button taps
+ * counted as leads), its fake conversions are excluded so the baseline reflects
+ * the real account, and its name is returned so per-campaign verdicts flag it for
+ * verification instead of recommending it be scaled.
+ *
+ * @returns {{ baselineCpa: number|null, anomalyNames: Set<string> }}
+ */
+const accountBaseline = (audit, totals) => {
+  const platforms = audit.normalizedDataset?.data?.platforms || {};
+  const campaigns = [];
+  for (const platform of Object.values(platforms)) {
+    for (const c of platform?.byLevel?.campaign || []) {
+      if (num(c.spend) > 0) {
+        campaigns.push({ name: c.name, spend: num(c.spend), conversions: num(c.results ?? c.conversions) });
+      }
+    }
+  }
+  const result = detectConversionAnomalies(campaigns);
+  const blended =
+    num(totals.conversions) > 0 ? num(totals.spend) / num(totals.conversions) : null;
+  if (!result) return { baselineCpa: blended, anomalyNames: new Set() };
+  return {
+    baselineCpa: result.trustedBaselineCpa,
+    anomalyNames: new Set(result.anomalies.map((a) => a.normName)),
+  };
+};
 
 const platformDocLabels = {
   GOOGLE: "google_ads",
@@ -173,6 +211,95 @@ const getTotals = (audit) => {
     },
     { spend: 0, impressions: 0, clicks: 0, conversions: 0 }
   );
+};
+
+/** A campaign is paused/inactive unless its status clearly says it's delivering. */
+const isPausedCampaign = (c) => {
+  const s = String(c.status || "").toUpperCase();
+  return /PAUSE|ARCHIV|DELETED|DISABLED|OFF\b|NOT_DELIVERING/.test(s);
+};
+
+const sumCampaignMetrics = (campaigns) =>
+  campaigns.reduce(
+    (acc, c) => {
+      acc.spend += num(c.spend);
+      acc.impressions += num(c.impressions);
+      acc.clicks += num(c.clicks);
+      acc.conversions += num(c.results ?? c.conversions);
+      return acc;
+    },
+    { spend: 0, impressions: 0, clicks: 0, conversions: 0 }
+  );
+
+/**
+ * Audit scope. We pull ALL campaigns (active + paused) so the report shows the
+ * full picture, then splits the figures three ways — total, active subtotal,
+ * paused subtotal — so the client sees exactly which spend/results came from live
+ * campaigns versus paused ones. The per-campaign COMPARISON focuses on the active
+ * set (what can still be optimised); the breakdown discloses the paused portion.
+ *
+ * Defensive: an account that was entirely paused during the window is not a bug —
+ * `hasPaused`/`hasActive` flags let the report adapt rather than blank out.
+ *
+ * @returns {{ active, paused, hasPaused, hasActive,
+ *   activeTotals, pausedTotals, totalTotals }}
+ */
+const getCampaignScope = (audit) => {
+  const platforms = audit.normalizedDataset?.data?.platforms || {};
+  const campaigns = [];
+  for (const p of Object.values(platforms)) {
+    for (const c of p?.byLevel?.campaign || []) {
+      if (num(c.spend) > 0) campaigns.push(c);
+    }
+  }
+  const active = campaigns.filter((c) => !isPausedCampaign(c));
+  const paused = campaigns.filter((c) => isPausedCampaign(c));
+  return {
+    active,
+    paused,
+    hasPaused: paused.length > 0,
+    hasActive: active.length > 0,
+    activeTotals: sumCampaignMetrics(active),
+    pausedTotals: sumCampaignMetrics(paused),
+    totalTotals: sumCampaignMetrics(campaigns),
+  };
+};
+
+/**
+ * The Active vs Paused breakdown — shows the total split into what came from live
+ * campaigns versus paused ones, so the headline figures are transparent about
+ * their composition. Only rendered when both an active and a paused-with-spend
+ * cohort exist (otherwise there is nothing to split).
+ */
+const scopeBreakdownSection = (scope, currency) => {
+  if (!scope.hasPaused || !scope.hasActive) return null;
+  const row = (label, t, count) => [label, t.spend, String(Math.round(t.conversions)), String(count)];
+  return {
+    id: "scope-breakdown",
+    eyebrow: "Data scope",
+    title: "Active vs paused campaigns",
+    intro:
+      "The audit reviews every campaign that spent in this period. The totals are split below so you can see what came from live campaigns versus paused ones — the per-campaign comparison and the recommendations focus on the active set you can still optimise.",
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Campaigns", align: "left" },
+          { header: "Spend", align: "right", width: "120px" },
+          { header: "Conversions", align: "right", width: "110px" },
+          { header: "Count", align: "right", width: "80px" },
+        ],
+        currency,
+        rows: [
+          row("Active", scope.activeTotals, scope.active.length),
+          row("Paused", scope.pausedTotals, scope.paused.length),
+          row("Total", scope.totalTotals, scope.active.length + scope.paused.length),
+        ],
+        footnote:
+          "Active = currently delivering. Paused = spent earlier in the window but not delivering now. Recommendations target the active set.",
+      },
+    ],
+  };
 };
 
 /**
@@ -596,13 +723,43 @@ const accountScorecardSection = (audit, currency, totals) => {
   const conversions = num(totals.conversions);
 
   const sectionA = audit.businessProfileSnapshot?.sectionA || {};
-  const businessType = sectionA.businessType || "Other";
+  const { businessType, source: btSource } = resolveBusinessType(audit, audit.normalizedDataset);
   const platform = audit.selectedPlatforms?.[0] || "GOOGLE";
-  const targetCpa = num(sectionA.targetCpa);
+  // Prefer the declared intake target; otherwise the engine may have inferred one
+  // from the campaigns' own Target-CPA settings (stamped on the summary). Track
+  // which so the caption can disclose an inferred target honestly.
+  const declaredTargetCpa = num(sectionA.targetCpa);
+  const inferredTargetCpa = num(
+    audit.normalizedDataset?.summary?.platforms?.[platform]?.inferredTargetCpa
+  );
+  const targetCpa = declaredTargetCpa > 0 ? declaredTargetCpa : inferredTargetCpa;
+  const targetInferred = declaredTargetCpa <= 0 && inferredTargetCpa > 0;
 
-  const ctr = impressions > 0 ? (clicks / impressions) * 100 : null;
   const cpc = clicks > 0 ? spend / clicks : null;
-  const cpa = conversions > 0 ? spend / conversions : null;
+  // Headline CPA uses the anomaly-quarantined baseline: when a campaign reports
+  // conversions too cheap to be genuine, the blended spend/conversions understates
+  // the real cost per result. accountBaseline() returns the trusted figure.
+  const { baselineCpa: trustedCpa, anomalyNames } = accountBaseline(audit, totals);
+  const blendedCpa = conversions > 0 ? spend / conversions : null;
+  const cpa = trustedCpa != null ? trustedCpa : blendedCpa;
+  const hasAnomaly = anomalyNames.size > 0;
+  // CTR must also exclude the anomaly's fake clicks — the blended CTR is inflated
+  // (e.g. 6% reported vs ~2.4% genuine) and would read "Strong" on a weak account.
+  let ctrImpr = impressions;
+  let ctrClk = clicks;
+  if (hasAnomaly) {
+    ctrImpr = 0;
+    ctrClk = 0;
+    const platforms = audit.normalizedDataset?.data?.platforms || {};
+    for (const p of Object.values(platforms)) {
+      for (const c of p?.byLevel?.campaign || []) {
+        if (anomalyNames.has(normName(c.name))) continue;
+        ctrImpr += num(c.impressions);
+        ctrClk += num(c.clicks);
+      }
+    }
+  }
+  const ctr = ctrImpr > 0 ? (ctrClk / ctrImpr) * 100 : null;
 
   const rows = [
     { metric: "Total spend", value: formatMoney(spend, currency), target: "—", status: "neutral" },
@@ -638,14 +795,28 @@ const accountScorecardSection = (audit, currency, totals) => {
       else if (ratio > 1.1) { status = "warn"; label = `${Math.round((ratio - 1) * 100)}% over target`; }
       rows.push({ metric: "Cost per acquisition", value: formatMoney(cpa, currency), target: formatMoney(targetCpa, currency), status, statusLabel: label });
     } else {
-      rows.push({ metric: "Cost per acquisition", value: formatMoney(cpa, currency), target: "—", status: "neutral" });
+      rows.push({ metric: "Cost per acquisition", value: formatMoney(cpa, currency), target: hasAnomaly ? "excl. tracking anomaly" : "—", status: "neutral" });
     }
   }
 
+  const anomalyNote = hasAnomaly
+    ? " Cost per acquisition and click-through rate exclude the campaign whose conversions are too cheap to be genuine (see the tracking-integrity finding) — its fake clicks would otherwise understate the real cost and inflate CTR."
+    : "";
+  // Disclose where the benchmark business type came from so a wrong one is
+  // visible and fixable: declared in the profile, or detected from the data.
+  const btQualifier =
+    btSource === "detected"
+      ? `${businessType} (detected from your account's objectives — set it in your profile if that's not right)`
+      : btSource === "declared"
+        ? `${businessType} (from your profile)`
+        : businessType;
   const caption =
-    targetCpa > 0
-      ? `CPA target (${formatMoney(targetCpa, currency)}) from your intake; CTR benchmark for ${businessType} on ${platformLabels[platform] || platform}.`
-      : `CTR benchmark for ${businessType} on ${platformLabels[platform] || platform}. Set a target CPA in intake to score CPA against it.`;
+    (targetCpa > 0
+      ? targetInferred
+        ? `CPA target (${formatMoney(targetCpa, currency)}) inferred from your campaigns' own Target-CPA settings — set an account target in intake to score against your actual goal; CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}.`
+        : `CPA target (${formatMoney(targetCpa, currency)}) from your intake; CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}.`
+      : `CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}. Set a target CPA in intake to score CPA against it.`) +
+    anomalyNote;
 
   return {
     id: "scorecard",
@@ -666,12 +837,19 @@ const campaignDispersionMaterial = 1000; // spend that makes a zero-conv verdict
  * makes the deep-dive read like a strategist's scorecard). Mirrors the prose
  * verdict's logic but as a single tone + short label.
  */
-const campaignStatus = (c, baselineCpa) => {
+const campaignStatus = (c, baselineCpa, isAnomaly = false, comparable = true) => {
   const status = String(c.status || "").toUpperCase();
   const results = num(c.results ?? c.conversions);
   const spend = num(c.spend);
   const cpa = c.cpa != null ? num(c.cpa) : results > 0 ? spend / results : null;
+  // A tracking-anomaly campaign looks like the best performer (implausibly cheap)
+  // — never badge it "good"/scale; flag it for verification.
+  if (isAnomaly) return { status: "bad", text: "Tracking?" };
   if (/DISAPPROVED/.test(status)) return { status: "bad", text: "Blocked" };
+  // Zero-conversion material spend is a problem regardless of cohort. But a
+  // converting campaign with no comparable peers (a singleton conversion type)
+  // cannot honestly be called over/under baseline — stay neutral.
+  if (results > 0 && !comparable) return { status: "neutral", text: "No peer" };
   if (results === 0 && spend >= campaignDispersionMaterial) return { status: "bad", text: "Zero conv" };
   if (baselineCpa && cpa && cpa >= baselineCpa * 2.5) return { status: "bad", text: `${(cpa / baselineCpa).toFixed(1)}x baseline` };
   if (baselineCpa && cpa && cpa >= baselineCpa * 1.5) return { status: "warn", text: "Above avg" };
@@ -686,17 +864,23 @@ const campaignStatus = (c, baselineCpa) => {
  * baseline CPA. Deterministic — the engine assigns the verdict, the report just
  * renders it.
  */
-const campaignVerdict = (c, baselineCpa) => {
+const campaignVerdict = (c, baselineCpa, isAnomaly = false, comparable = true) => {
   const status = String(c.status || "").toUpperCase();
   const results = num(c.results ?? c.conversions);
   const spend = num(c.spend);
   const cpa = c.cpa != null ? num(c.cpa) : results > 0 ? spend / results : null;
 
+  if (isAnomaly) {
+    return "Conversions too cheap to be genuine — verify the conversion event before trusting or scaling this campaign.";
+  }
   if (/DISAPPROVED/.test(status)) {
     return "Disapproved — blocked from delivering; restoring it is the priority.";
   }
   if (results === 0 && spend >= campaignDispersionMaterial) {
     return "Material spend, zero conversions — likely a targeting or geo misconfiguration.";
+  }
+  if (results > 0 && !comparable) {
+    return "The only campaign of its conversion type — no comparable peer to judge its cost against. Track it against your own target, not the account average.";
   }
   if (baselineCpa && cpa && cpa >= baselineCpa * 2.5) {
     return `Converting at ${(cpa / baselineCpa).toFixed(1)}× the account average — the main efficiency drag.`;
@@ -719,42 +903,71 @@ const campaignVerdict = (c, baselineCpa) => {
  * campaign's numbers and a verdict, which is what reads as expert review.
  * Returns null when there isn't a meaningful multi-campaign breakdown.
  */
-const campaignDeepDiveSection = (audit, currency, totals) => {
+const MAX_COMPARISON_ROWS = 40; // safety cap so a sprawling account can't bloat the PDF
+
+const campaignDeepDiveSection = (audit, currency, totals, scope) => {
   const platforms = audit.normalizedDataset?.data?.platforms || {};
-  const rows = [];
+  let rows = [];
   for (const platform of Object.values(platforms)) {
     for (const c of platform?.byLevel?.campaign || []) {
       if (num(c.spend) > 0) rows.push(c);
     }
   }
+  // Scope the comparison to the campaigns the client can act on: when active
+  // campaigns exist, compare ALL of them (the paused cohort is disclosed in the
+  // Active vs Paused breakdown). All-paused accounts fall back to showing those.
+  const activeScoped = scope?.hasActive;
+  if (activeScoped) rows = scope.active;
   if (rows.length < 2) return null;
 
-  const baselineCpa =
-    num(totals.conversions) > 0 ? num(totals.spend) / num(totals.conversions) : null;
+  // Baseline from the same cohort being compared (active when scoped), so it isn't
+  // skewed by paused spend the comparison no longer shows.
+  const baseTotals = activeScoped ? scope.activeTotals : totals;
+  const { baselineCpa, anomalyNames } = accountBaseline(audit, baseTotals);
 
-  const ranked = rows.sort((a, b) => num(b.spend) - num(a.spend)).slice(0, 8);
+  // Per-campaign baselines by conversion type: each campaign is judged only
+  // against peers buying the same kind of result (a Telegram conversation vs a
+  // website lead). Anomaly campaigns are excluded so their fake-cheap CPA can't
+  // drag a cohort. A campaign with no comparable peers gets no over/under verdict.
+  const cohorts = buildCohortBaselines(rows.filter((c) => !anomalyNames.has(normName(c.name))));
+
+  // Show ALL (active) campaigns, not just the top few — the full comparison the
+  // client asked for — capped only so a huge account can't blow up the document.
+  const ranked = rows.sort((a, b) => num(b.spend) - num(a.spend)).slice(0, MAX_COMPARISON_ROWS);
 
   const tableRows = ranked.map((c) => {
     const results = num(c.results ?? c.conversions);
     const cpa = c.cpa != null ? num(c.cpa) : results > 0 ? num(c.spend) / results : null;
+    const isAnomaly = anomalyNames.has(normName(c.name));
+    const cohortBase = cohortBaselineFor(c, cohorts);
+    const comparable = cohortBase != null;
     return [
       c.name || "(unnamed campaign)",
       num(c.spend),
       String(Math.round(results)),
       cpa != null ? formatMoney(cpa, currency) : "—",
-      campaignStatus(c, baselineCpa), // status pill cell { status, text }
-      campaignVerdict(c, baselineCpa),
+      campaignStatus(c, cohortBase ?? baselineCpa, isAnomaly, comparable), // { status, text }
+      campaignVerdict(c, cohortBase ?? baselineCpa, isAnomaly, comparable),
     ];
   });
+
+  const pausedNote =
+    activeScoped && scope.hasPaused
+      ? ` ${scope.paused.length} paused campaign${scope.paused.length === 1 ? "" : "s"} ${scope.paused.length === 1 ? "is" : "are"} shown separately in the Active vs Paused breakdown.`
+      : "";
+  const scopeIntro = activeScoped
+    ? `All ${ranked.length} active campaign${ranked.length === 1 ? "" : "s"} compared against the active baseline` +
+      (baselineCpa ? ` (cost per result ${formatMoney(baselineCpa, currency)})` : "") +
+      `.${pausedNote}`
+    : "Each campaign's own numbers against the account baseline" +
+      (baselineCpa ? ` (cost per result ${formatMoney(baselineCpa, currency)})` : "") +
+      " — so the diagnosis is grounded in per-campaign performance, not a blended average.";
 
   return {
     id: "campaign-deep-dive",
     eyebrow: "Campaign performance",
-    title: "Every campaign, with a verdict",
-    intro:
-      "Each campaign's own numbers against the account baseline" +
-      (baselineCpa ? ` (cost per result ${formatMoney(baselineCpa, currency)})` : "") +
-      " — so the diagnosis is grounded in per-campaign performance, not a blended average.",
+    title: activeScoped ? "Every active campaign, compared" : "Every campaign, with a verdict",
+    intro: scopeIntro,
     blocks: [
       {
         type: "data_table",
@@ -768,8 +981,9 @@ const campaignDeepDiveSection = (audit, currency, totals) => {
         ],
         currency,
         rows: tableRows,
-        footnote:
-          "Cost per result uses each campaign's own conversions; the verdict compares it to the account baseline.",
+        footnote: activeScoped
+          ? "Cost per result uses each campaign's own conversions; the verdict compares it to the active baseline. Comparison covers active campaigns; the paused total is in the Active vs Paused breakdown."
+          : "Cost per result uses each campaign's own conversions; the verdict compares it to the account baseline.",
       },
     ],
   };
@@ -809,22 +1023,30 @@ const campaignNextSteps = (c, baselineCpa) => {
  * moves. Matches the reference Claude audit's per-campaign sections. Sits after
  * the overview table. Returns null without a meaningful multi-campaign breakdown.
  */
-const campaignCardsSection = (audit, currency, totals) => {
+const campaignCardsSection = (audit, currency, totals, scope) => {
   const platforms = audit.normalizedDataset?.data?.platforms || {};
-  const all = [];
+  let all = [];
   for (const platform of Object.values(platforms)) {
     for (const c of platform?.byLevel?.campaign || []) {
       if (num(c.spend) > 0) all.push(c);
     }
   }
+  const activeScoped = scope?.hasActive;
+  if (activeScoped) all = scope.active; // top active campaigns only
   if (all.length < 2) return null;
 
-  const baselineCpa = num(totals.conversions) > 0 ? num(totals.spend) / num(totals.conversions) : null;
+  const { baselineCpa, anomalyNames } = accountBaseline(audit, activeScoped ? scope.activeTotals : totals);
   const sectionA = audit.businessProfileSnapshot?.sectionA || {};
-  const businessType = sectionA.businessType || "Other";
+  const { businessType } = resolveBusinessType(audit, audit.normalizedDataset);
   const platform = audit.selectedPlatforms?.[0] || "GOOGLE";
-  const targetCpa = num(sectionA.targetCpa);
+  // Declared intake target, else the engine's inferred target (campaign tCPAs).
+  const targetCpa =
+    num(sectionA.targetCpa) ||
+    num(audit.normalizedDataset?.summary?.platforms?.[platform]?.inferredTargetCpa);
   const ctrBench = getBenchmark("ctr", platform, businessType);
+  // Per-conversion-type baselines (anomalies excluded) — a campaign's cost is
+  // judged against peers buying the same kind of result, not a blended average.
+  const cohorts = buildCohortBaselines(all.filter((c) => !anomalyNames.has(normName(c.name))));
 
   const top = all.sort((a, b) => num(b.spend) - num(a.spend)).slice(0, 3);
 
@@ -849,9 +1071,17 @@ const campaignCardsSection = (audit, currency, totals) => {
       metrics.push({ metric: "Click-through rate", value: `${ctr.toFixed(2)}%`, target: `≥ ${ctrBench.warning}%`, status, statusLabel: label });
     }
 
+    const isAnomaly = anomalyNames.has(normName(c.name));
+    const cohortBase = cohortBaselineFor(c, cohorts);
+    const comparable = cohortBase != null;
     if (cpa != null) {
-      const ref = targetCpa > 0 ? targetCpa : baselineCpa;
-      if (ref && ref > 0) {
+      // Prefer the client's declared target; otherwise the campaign's cohort
+      // (like-for-like) baseline. Never the blended cross-type average.
+      const ref = targetCpa > 0 ? targetCpa : cohortBase;
+      if (isAnomaly) {
+        // An implausibly-cheap CPA here is a tracking artifact, not "on target".
+        metrics.push({ metric: "Cost per result", value: formatMoney(cpa, currency), target: "verify event", status: "bad", statusLabel: "Tracking?" });
+      } else if (ref && ref > 0) {
         const ratio = cpa / ref;
         let status = "good";
         let label = "On target";
@@ -859,11 +1089,37 @@ const campaignCardsSection = (audit, currency, totals) => {
         else if (ratio > 1.1) { status = "warn"; label = `${Math.round((ratio - 1) * 100)}% over`; }
         metrics.push({ metric: "Cost per result", value: formatMoney(cpa, currency), target: `vs ${formatMoney(ref, currency)}`, status, statusLabel: label });
       } else {
-        metrics.push({ metric: "Cost per result", value: formatMoney(cpa, currency), target: "—", status: "neutral" });
+        // No declared target and no comparable peer — show the cost, don't judge it.
+        metrics.push({ metric: "Cost per result", value: formatMoney(cpa, currency), target: comparable ? "—" : "no peer", status: "neutral" });
       }
     }
 
-    const st = campaignStatus(c, baselineCpa);
+    // Conversion-rate math: the CVR a campaign needs to hit its CPA target at its
+    // current click cost (required CVR = CPC ÷ target CPA) vs what it actually
+    // converts. This isolates the post-click gap per campaign — the difference
+    // between "nearly there" (BD) and a structural problem (PK at 15× off).
+    const cvr = !isAnomaly && clicks > 0 && results > 0 ? (results / clicks) * 100 : null;
+    const cpc = clicks > 0 ? spend / clicks : null;
+    const cvrRef = targetCpa > 0 ? targetCpa : cohortBase;
+    if (cvr != null) {
+      const requiredCvr = cpc != null && cvrRef && cvrRef > 0 ? (cpc / cvrRef) * 100 : null;
+      if (requiredCvr != null && requiredCvr > 0) {
+        const gap = requiredCvr / cvr;
+        let status = "good";
+        let label = "On track";
+        if (gap >= 1.5) { status = "bad"; label = `${gap.toFixed(1)}× short`; }
+        else if (gap >= 1.1) { status = "warn"; label = `${Math.round((gap - 1) * 100)}% short`; }
+        metrics.push({ metric: "Conversion rate", value: `${cvr.toFixed(2)}%`, target: `need ${requiredCvr.toFixed(2)}%`, status, statusLabel: label });
+      } else {
+        metrics.push({ metric: "Conversion rate", value: `${cvr.toFixed(2)}%`, target: "—", status: "neutral" });
+      }
+    }
+
+    // Status / verdict judge the campaign against like-for-like peers (its cohort
+    // baseline), falling back to the blended baseline only when no cohort applies.
+    // The per-metric "Cost per result" row above already scores against the target.
+    const statusBase = cohortBase ?? baselineCpa;
+    const st = campaignStatus(c, statusBase, isAnomaly, comparable);
     return {
       type: "campaign_card",
       name: c.name || "(unnamed campaign)",
@@ -871,8 +1127,14 @@ const campaignCardsSection = (audit, currency, totals) => {
       status_label: st.text,
       spend: formatMoney(spend, currency),
       metrics,
-      verdict: campaignVerdict(c, baselineCpa),
-      steps: campaignNextSteps(c, baselineCpa),
+      verdict: campaignVerdict(c, statusBase, isAnomaly, comparable),
+      steps: isAnomaly
+        ? [
+            "Verify the conversion event in the platform before trusting this campaign's results.",
+            "If it is a button tap / click-to-chat or wrong pixel event, fix the event mapping — do not scale on these numbers.",
+            "Re-baseline the account once the event is corrected.",
+          ]
+        : campaignNextSteps(c, statusBase),
     };
   });
 
@@ -1111,11 +1373,25 @@ export const buildReportDocumentFromAudit = (audit) => {
 
   const currency = getCurrency(audit);
   const totals = getTotals(audit);
+  // Pull ALL campaigns (active + paused); the report shows the total and splits it
+  // active vs paused. Headline = total; the comparison focuses on the active set.
+  const scope = getCampaignScope(audit);
   const findings = sortFindingsForReport(audit.ruleFindings || []);
   if (!findings.length) return noFindingsDocument({ audit, currency, totals });
 
-  const top = findings[0];
-  const topMoney = moneyMagnitude(top.estimatedImpact || top.evidence);
+  // The headline must be a finding that stands on its own. A "secondary" finding
+  // is an overlap lens ("the placement view of inefficiency the campaign finding
+  // already counts") reframed to net PKR 0 — it must never lead the report, or
+  // the cover announces a number that recovers nothing. Lead with the first
+  // primary finding instead; fall back only if every finding is secondary.
+  const isSecondaryLens = (f) => f.evidence?.trust?.role === "secondary";
+  // When the source data is physically impossible (clicks > impressions, …) every
+  // cost figure is untrustworthy, so the data-integrity warning LEADS and the
+  // report quantifies nothing — a confident dollar number on garbage input is the
+  // worst outcome. Otherwise lead with the first finding that stands on its own.
+  const integrityFinding = findings.find((f) => f.evidence?.dataIntegrityBroken === true);
+  const top = integrityFinding || findings.find((f) => !isSecondaryLens(f)) || findings[0];
+  const topMoney = integrityFinding ? 0 : moneyMagnitude(top.estimatedImpact || top.evidence);
   const score = audit.healthScore ?? 0;
   const severityCounts = findings.reduce((acc, f) => {
     acc[f.severity] = (acc[f.severity] || 0) + 1;
@@ -1129,13 +1405,20 @@ export const buildReportDocumentFromAudit = (audit) => {
   const isRecoverableWaste = (f) =>
     f.evidence?.blocksDelivery !== true &&
     f.evidence?.diagnostic !== true &&
+    f.evidence?.advisory !== true &&
     findingRecoverable(f) > 0;
-  const quantified = findings.filter(isRecoverableWaste);
+  // Broken integrity → quantify nothing (no money map, no recoverable headline).
+  const quantified = integrityFinding ? [] : findings.filter(isRecoverableWaste);
   // Overlap-aware total: the same wasted spend surfaces as several findings
   // (campaign + audience + device + geo on one campaign). Count each dollar once
   // instead of summing — naive summing inflates the headline 2-3×.
-  const { total: recoverable } = reconcileRecoverable(
-    findings.filter((f) => f.evidence?.blocksDelivery !== true && f.evidence?.diagnostic !== true),
+  const { total: recoverable } = integrityFinding ? { total: 0 } : reconcileRecoverable(
+    findings.filter(
+      (f) =>
+        f.evidence?.blocksDelivery !== true &&
+        f.evidence?.diagnostic !== true &&
+        f.evidence?.advisory !== true
+    ),
     { accountSpend: num(totals.spend) }
   );
   const platform = audit.selectedPlatforms?.[0] || top.platform || "GOOGLE";
@@ -1174,6 +1457,11 @@ export const buildReportDocumentFromAudit = (audit) => {
   const scorecard = accountScorecardSection(audit, currency, totals);
   if (scorecard) sections.push(scorecard);
 
+  // Active vs paused split — discloses how the headline total divides between live
+  // and paused campaigns. Only rendered when both cohorts have spend.
+  const scopeBreakdown = scopeBreakdownSection(scope, currency);
+  if (scopeBreakdown) sections.push(scopeBreakdown);
+
   if (quantified.length > 0) {
     const maxImpact = Math.max(
       ...quantified.map((f) => findingRecoverable(f)),
@@ -1205,10 +1493,20 @@ export const buildReportDocumentFromAudit = (audit) => {
     });
   }
 
+  // Show every finding in the index, not a truncated subset — a table that said
+  // "10 findings" while listing 8 broke trust in the count. Capped only as a
+  // runaway guard; the title stays honest about what's shown when that hits.
+  const FINDINGS_TABLE_MAX = 15;
+  const shownFindings = findings.slice(0, FINDINGS_TABLE_MAX);
+  const findingsTitle =
+    findings.length > FINDINGS_TABLE_MAX
+      ? `Top ${FINDINGS_TABLE_MAX} of ${findings.length} findings, ranked by impact`
+      : `${findings.length} findings, ranked by impact`;
+
   sections.push({
     id: "findings",
     eyebrow: "Findings",
-    title: `${findings.length} findings, ranked by impact`,
+    title: findingsTitle,
     intro: "Findings are ordered by leverage — severity and root-cause gravity first, then confidence, then recoverable spend.",
     blocks: [
       {
@@ -1220,7 +1518,7 @@ export const buildReportDocumentFromAudit = (audit) => {
           { header: "Impact", align: "right", width: "140px" },
         ],
         currency,
-        rows: findings.slice(0, 8).map((f, i) => [
+        rows: shownFindings.map((f, i) => [
           String(i + 1),
           f.title,
           f.severity,
@@ -1234,12 +1532,12 @@ export const buildReportDocumentFromAudit = (audit) => {
   // Per-campaign deep-dive — the consultant-grade spine. Sits between the
   // findings list and the detailed evidence so the reader sees every campaign's
   // numbers + verdict before the issue-by-issue breakdown.
-  const deepDive = campaignDeepDiveSection(audit, currency, totals);
+  const deepDive = campaignDeepDiveSection(audit, currency, totals, scope);
   if (deepDive) sections.push(deepDive);
 
   // Per-campaign scored cards (CTR vs benchmark, CPA vs target) — the strategist
   // view, after the overview table.
-  const campaignCards = campaignCardsSection(audit, currency, totals);
+  const campaignCards = campaignCardsSection(audit, currency, totals, scope);
   if (campaignCards) sections.push(campaignCards);
 
   sections.push({
@@ -1273,21 +1571,29 @@ export const buildReportDocumentFromAudit = (audit) => {
   const roadmap = roadmapSection(findings, currency);
   if (roadmap) sections.push(roadmap);
 
-  const projection = topMoney > 0
+  // Project the RECONCILED recoverable total — the same figure as the
+  // "Recoverable this period" key number — never `topMoney`. topMoney is scraped
+  // from the lead finding's narrative; when that finding is diagnostic (a
+  // tracking anomaly whose text cites the PKR 115 baseline) it would project the
+  // baseline CPA as if it were recoverable money, inventing a quarterly/annual
+  // "opportunity" that recovers nothing. No recoverable spend → no projection.
+  const projection = recoverable > 0
     ? {
-        period_value: topMoney,
-        quarterly: topMoney * 3,
-        annualized: topMoney * 12,
-        disclaimer: "Projection multiplies the measured period impact and assumes spend and performance patterns remain stable.",
+        period_value: recoverable,
+        quarterly: recoverable * 3,
+        annualized: recoverable * 12,
+        disclaimer: "Projection multiplies the recoverable spend measured this period and assumes spend and performance patterns remain stable.",
       }
     : undefined;
 
   return {
     masthead: {
-      headline: topMoney > 0 ? `${top.title}`.slice(0, 80) : `${platformLabel} needs cleanup`,
-      subline: topMoney > 0
-        ? `${top.estimatedImpact} is the clearest quantified opportunity in this audit.`
-        : "The largest risks are structural and not safely quantifiable from available data.",
+      headline: integrityFinding || topMoney > 0 ? `${top.title}`.slice(0, 80) : `${platformLabel} needs cleanup`,
+      subline: integrityFinding
+        ? top.detail
+        : topMoney > 0
+          ? top.estimatedImpact
+          : "The largest risks are structural and not safely quantifiable from available data.",
       platform: platformDocLabels[platform] || "google_ads",
       health_score: score,
       score_band: scoreBand(score),
@@ -1303,7 +1609,7 @@ export const buildReportDocumentFromAudit = (audit) => {
     ],
     executive_summary: {
       verdict: topMoney > 0
-        ? `${top.estimatedImpact} is the single most important number in this audit.`
+        ? `The single most important finding in this audit: ${top.estimatedImpact}`
         : `The biggest issue is ${top.title}. It is a business risk, but the available data does not support a reliable money estimate.`,
       paragraphs: [
         // Root-cause synthesis leads when the account has a binding constraint
@@ -1331,6 +1637,14 @@ export const buildReportDocumentFromAudit = (audit) => {
     },
     method_notes: [
       { label: "Numbers", text: "Every figure comes from verified account data. The report does not invent chart values." },
+      ...(scope.hasPaused && scope.hasActive
+        ? [{
+            label: "Scope",
+            text: `Figures cover all ${scope.active.length + scope.paused.length} campaigns that spent this period. The Active vs Paused breakdown splits the total: ${formatMoney(scope.activeTotals.spend, currency)} from ${scope.active.length} active campaign${scope.active.length === 1 ? "" : "s"} and ${formatMoney(scope.pausedTotals.spend, currency)} from ${scope.paused.length} paused. The per-campaign comparison and recommendations focus on the active set, which is what can still be optimised.`,
+          }]
+        : !scope.hasActive && scope.hasPaused
+          ? [{ label: "Scope", text: "Every campaign was paused during this period, so the figures cover all campaigns — there is no active set to isolate." }]
+          : []),
       { label: "Benchmarks", text: validBenchmarkComparisons.length ? "Peer, historical, or industry comparisons are shown only where available." : "No benchmark section is rendered because no benchmark facts were available." },
       { label: "Confidence", text: "Confidence labels reflect data coverage, severity, and sample notes." },
     ],

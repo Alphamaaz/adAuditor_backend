@@ -64,8 +64,14 @@ const cleanClientText = (value) =>
     .replace(/<br\s*\/?>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/\b[A-Z]{2,}(?:-[A-Z0-9]+)+-\d{2,}\b/g, "")
+    // Strip internal rule codes ("Bench CPM 001", "Str 002") from client text.
+    // NOT case-insensitive: under /i the [A-Z] word class also matched lowercase
+    // connectives, so a real sentence like "Meta CTR is 62.8% below…" parsed as a
+    // rule code ("Meta"+"CTR"+"is"+"62") and lost its prefix → ".8% below…". The
+    // middle abbreviations in a real code are uppercase (CPM/CTR/STR), so we match
+    // them case-sensitively and just list both case forms of the leading keyword.
     .replace(
-      /\b(?:STR|KW|OPP|AUD|CRE|DATA|BP|BENCH|SEG|DIAG|MEMORY|PEER|META|GOOGLE|TIKTOK)(?:\s+[A-Z]+){0,3}\s+\d{2,}\b/gi,
+      /\b(?:STR|KW|OPP|AUD|CRE|DATA|BP|BENCH|SEG|DIAG|MEMORY|PEER|META|GOOGLE|TIKTOK|Str|Kw|Opp|Aud|Cre|Data|Bp|Bench|Seg|Diag|Memory|Peer|Meta|Google|Tiktok)(?:\s+[A-Z]{2,6}){0,3}\s+\d{2,}\b/g,
       ""
     )
     .replace(/\bdayOfWeek\b/g, "day of week")
@@ -227,7 +233,7 @@ const renderProjection = (projection) => {
 };
 
 const renderExecutiveSummary = (summary = {}) => `
-  <section class="section">
+  <section class="section" id="executive-summary">
     <div class="eyebrow">Executive summary</div>
     <h2>What this audit found</h2>
     <div class="verdict"><p>${markdown(summary.verdict)}</p></div>
@@ -511,6 +517,58 @@ const renderSection = (section, index) => {
   </section>`;
 };
 
+// A section appears in the body only when it has at least one renderable block
+// (renderSection returns "" otherwise). The TOC must use the SAME test, and the
+// SAME index-based numbering, so a contents entry can never point at a section
+// that didn't render or show a number that disagrees with the body.
+const sectionWillRender = (section) =>
+  (section?.blocks || []).map(renderBlock).filter(Boolean).length > 0;
+
+/**
+ * Table of contents — a clickable index at the front of the report.
+ *
+ * Entries are built from the document model, so titles and the two-digit section
+ * numbers are exact and always match the body. No page numbers: headless Chrome
+ * can't resolve them in a single render pass and naive estimates drift across the
+ * report's break-inside:avoid blocks — wrong numbers would be worse than none.
+ * Each row is an in-document anchor, which Chrome turns into a clickable internal
+ * link in the PDF.
+ */
+const renderTableOfContents = (doc) => {
+  const entries = [];
+  if (doc.executive_summary) {
+    entries.push({ no: "", id: "executive-summary", label: "Executive Summary", sub: "What this audit found" });
+  }
+  (doc.sections || []).forEach((section, index) => {
+    if (!sectionWillRender(section)) return;
+    // The eyebrow is the short, scannable section name a reader looks for
+    // (Health Score, Money Map, Findings…); the title is its descriptive line.
+    entries.push({
+      no: String(index + 1).padStart(2, "0"),
+      id: section.id,
+      label: cleanClientText(section.eyebrow) || cleanClientText(section.title),
+      sub: cleanClientText(section.eyebrow) ? cleanClientText(section.title) : "",
+    });
+  });
+  if ((doc.method_notes || []).length) {
+    entries.push({ no: "MT", id: "method", label: "Method", sub: "Benchmarks, confidence & assumptions" });
+  }
+  // Nothing to navigate — don't add a contents page to a one-section report.
+  if (entries.length < 3) return "";
+
+  return `<section class="section toc" id="table-of-contents">
+    <div class="section-rule"><span class="no">··</span><span class="ln"></span></div>
+    <div class="eyebrow">Contents</div>
+    <h2>What's in this report</h2>
+    <nav class="toc-list">${entries
+      .map(
+        (e) =>
+          `<a class="toc-row" href="#${escapeHtml(e.id)}"><span class="toc-no">${escapeHtml(e.no || "—")}</span><span class="toc-text"><span class="toc-label">${escapeHtml(e.label)}</span>${e.sub ? `<span class="toc-sub">${escapeHtml(e.sub)}</span>` : ""}</span></a>`
+      )
+      .join("")}</nav>
+  </section>`;
+};
+
 // The week-one Action Plan is no longer rendered separately — the phased
 // Roadmap (Phase 1 = this week) is the single action home, with per-item effort
 // + recoverable. The `action_plan` field stays on the document for schema
@@ -518,7 +576,7 @@ const renderSection = (section, index) => {
 
 const renderMethod = (notes = []) =>
   notes.length
-    ? `<section class="section method"><div class="section-rule"><span class="no">MT</span><span class="ln"></span></div><div class="eyebrow">Method</div><h2>Benchmarks, confidence & assumptions</h2><ul>${notes
+    ? `<section class="section method" id="method"><div class="section-rule"><span class="no">MT</span><span class="ln"></span></div><div class="eyebrow">Method</div><h2>Benchmarks, confidence & assumptions</h2><ul>${notes
         .map((n) => `<li><b>${escapeHtml(cleanClientText(n.label))}.</b> ${escapeHtml(cleanClientText(n.text))}</li>`)
         .join("")}</ul></section>`
     : "";
@@ -527,7 +585,7 @@ export const premiumReportStyles = `.brand-logo{max-height:48px;max-width:180px;
 
 const embeddedReportOverrides = `html,body{width:100%;max-width:100%;overflow-x:hidden}body{background:#f7f4ef}.sheet{width:calc(100% - 56px);max-width:1160px;margin:28px auto 64px;border:1px solid #E3DED4;border-radius:18px;box-shadow:0 18px 60px rgba(22,33,27,.08);overflow:hidden}.pad{padding-left:clamp(28px,5vw,72px);padding-right:clamp(28px,5vw,72px)}.masthead{padding:42px clamp(28px,5vw,72px) 38px}.masthead:after{right:-130px;top:-120px;opacity:.65}.mast-grid{grid-template-columns:minmax(0,1fr) 180px;align-items:center;gap:36px}.mast-title h1{max-width:760px;font-size:clamp(30px,4vw,46px);line-height:1.08;letter-spacing:0}.mast-sub{max-width:640px;font-size:15px;line-height:1.65}.mast-title,.mast-title h1,.mast-sub,p,h1,h2,h3,li,td,th{overflow-wrap:break-word;word-break:normal}.mast-meta{gap:10px 28px}.keystrip{grid-template-columns:repeat(4,minmax(0,1fr));background:#fff}.kcell{min-width:0;padding:24px 18px}.kcell b{font-size:clamp(22px,2.6vw,30px);overflow-wrap:break-word}.body-wrap{padding-top:54px}.section{margin-bottom:72px}.section-rule{margin-bottom:22px}.verdict{padding:24px 26px;border-radius:10px}.verdict p{font-size:clamp(18px,2vw,22px);line-height:1.55}table{table-layout:auto;max-width:100%;font-size:13px}td,th{overflow-wrap:break-word;word-break:normal}td.num,th.num{white-space:normal;text-align:right;min-width:112px}.chart{max-width:100%;overflow:hidden;border:1px solid #ECE8DE;border-radius:14px;background:#fff;padding:18px 18px 8px;margin:24px 0 14px}.chart svg{max-width:100%;height:auto}.chart-cap{padding:0 4px}.finding{border:1px solid #ECE8DE;border-radius:14px;background:#fff;padding:22px 24px;margin:18px 0;box-shadow:0 8px 24px rgba(22,33,27,.035)}.finding:first-of-type{border-color:#D9B16D}.finding h3{font-size:21px}.callout{border-radius:10px}.projection{border:1px solid #E3DED4;border-radius:14px;overflow:hidden}.proj-cell+.proj-cell{border-left:1px solid #E3DED4}@media(max-width:900px){.sheet{width:calc(100% - 28px);margin:14px auto 40px;border-radius:12px}.mast-grid{grid-template-columns:1fr}.gauge{text-align:left}.gauge svg{margin-left:0}.keystrip{grid-template-columns:repeat(2,minmax(0,1fr))}.kcell:nth-child(3){border-left:none}.mast-meta{display:grid;grid-template-columns:1fr}.pad{padding-left:22px;padding-right:22px}.masthead{padding-left:22px;padding-right:22px}td.num,th.num{text-align:left}.projection{grid-template-columns:1fr}.proj-cell+.proj-cell{border-left:none;border-top:1px solid #E3DED4}}@media(max-width:640px){.keystrip{grid-template-columns:1fr}.kcell+.kcell{border-left:none;border-top:1px solid var(--line)}table,thead,tbody,tr,td,th{display:block;width:100%}thead{display:none}td{padding:10px 0}tr{padding:12px 0;border-bottom:1px solid var(--line)}tr:last-child td{border-bottom:0}}`;
 
-const premiumPolishOverrides = `.status-pill{display:inline-block;font:600 10.5px 'Inter';letter-spacing:.03em;padding:2px 10px;border-radius:99px;white-space:nowrap}.status-good{background:var(--money-bg);color:var(--money)}.status-warn{background:var(--amber-bg);color:var(--amber)}.status-bad{background:var(--red-bg);color:var(--red)}.status-neutral{color:var(--faint)}.scorecard td:first-child{color:var(--ink);font-weight:500}.roadmap{margin:18px 0 8px}.phase{border:1px solid #ECE8DE;border-left:3px solid var(--brand);border-radius:10px;padding:16px 22px;margin:14px 0;background:#fff;break-inside:avoid}.phase-head{display:flex;align-items:baseline;gap:12px;margin-bottom:8px}.phase-no{font:600 15px 'Fraunces',serif;color:var(--ink)}.phase-time{font:600 10.5px 'IBM Plex Mono';letter-spacing:.1em;text-transform:uppercase;color:var(--brand)}.phase-goal{margin:0 0 10px;color:var(--soft)}.phase ol{margin:0 0 2px 20px}.phase-result{color:var(--money);font-weight:600;font-size:.9em;white-space:nowrap}.phase-effort{display:inline-block;font:600 10px 'IBM Plex Mono';letter-spacing:.04em;text-transform:uppercase;color:var(--muted);background:#F3F4F6;border-radius:4px;padding:1px 7px;margin-left:4px}.section{margin-bottom:82px}.eyebrow{color:var(--muted)}.num{font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}p .num,.verdict .num,.mast-sub .num{font-weight:700;color:var(--money)}.score-gauge-card{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:24px;border:1px solid #ECE8DE;border-radius:14px;background:#fff;padding:20px 22px;margin:24px 0}.score-gauge-card .g-num{fill:var(--ink)}.score-gauge-card .g-of{fill:var(--muted)}.score-gauge-card .gauge path:first-child{stroke:#E8EAE4}.score-gauge-card .small{margin:0}.finding{position:relative;padding-left:30px}.finding:before{content:'';position:absolute;left:16px;top:24px;width:3px;height:34px;border-radius:99px;background:#9CA3AF}.finding.sev-critical:before{background:var(--red)}.finding.sev-high:before{background:#C2410C}.finding.sev-medium:before{background:var(--amber)}.finding.sev-low:before{background:#9CA3AF}.finding-head{flex-wrap:wrap;color:var(--muted)}.finding-head .mono{color:var(--muted);font-size:11px;letter-spacing:.02em}.takeaway{font:500 17px/1.55 'Fraunces',serif;color:var(--ink);border-left:3px solid var(--money);padding-left:14px;margin:20px 0 18px}.evidence-table td.num{max-width:190px}.method{margin-top:36px}@media(max-width:640px){.score-gauge-card{grid-template-columns:1fr}.finding{padding-left:24px}.finding:before{left:12px}}`;
+const premiumPolishOverrides = `.status-pill{display:inline-block;font:600 10.5px 'Inter';letter-spacing:.03em;padding:2px 10px;border-radius:99px;white-space:nowrap}.status-good{background:var(--money-bg);color:var(--money)}.status-warn{background:var(--amber-bg);color:var(--amber)}.status-bad{background:var(--red-bg);color:var(--red)}.status-neutral{color:var(--faint)}.scorecard td:first-child{color:var(--ink);font-weight:500}.roadmap{margin:18px 0 8px}.phase{border:1px solid #ECE8DE;border-left:3px solid var(--brand);border-radius:10px;padding:16px 22px;margin:14px 0;background:#fff;break-inside:avoid}.phase-head{display:flex;align-items:baseline;gap:12px;margin-bottom:8px}.phase-no{font:600 15px 'Fraunces',serif;color:var(--ink)}.phase-time{font:600 10.5px 'IBM Plex Mono';letter-spacing:.1em;text-transform:uppercase;color:var(--brand)}.phase-goal{margin:0 0 10px;color:var(--soft)}.phase ol{margin:0 0 2px 20px}.phase-result{color:var(--money);font-weight:600;font-size:.9em;white-space:nowrap}.phase-effort{display:inline-block;font:600 10px 'IBM Plex Mono';letter-spacing:.04em;text-transform:uppercase;color:var(--muted);background:#F3F4F6;border-radius:4px;padding:1px 7px;margin-left:4px}.section{margin-bottom:82px}.eyebrow{color:var(--muted)}.num{font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}p .num,.verdict .num,.mast-sub .num{font-weight:700;color:var(--money)}.score-gauge-card{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:24px;border:1px solid #ECE8DE;border-radius:14px;background:#fff;padding:20px 22px;margin:24px 0}.score-gauge-card .g-num{fill:var(--ink)}.score-gauge-card .g-of{fill:var(--muted)}.score-gauge-card .gauge path:first-child{stroke:#E8EAE4}.score-gauge-card .small{margin:0}.finding{position:relative;padding-left:30px}.finding:before{content:'';position:absolute;left:16px;top:24px;width:3px;height:34px;border-radius:99px;background:#9CA3AF}.finding.sev-critical:before{background:var(--red)}.finding.sev-high:before{background:#C2410C}.finding.sev-medium:before{background:var(--amber)}.finding.sev-low:before{background:#9CA3AF}.finding-head{flex-wrap:wrap;color:var(--muted)}.finding-head .mono{color:var(--muted);font-size:11px;letter-spacing:.02em}.takeaway{font:500 17px/1.55 'Fraunces',serif;color:var(--ink);border-left:3px solid var(--money);padding-left:14px;margin:20px 0 18px}.evidence-table td.num{max-width:190px}.method{margin-top:36px}.toc-list{margin:20px 0 4px;border-top:2px solid var(--line-strong)}.toc-row{display:flex;align-items:baseline;gap:16px;padding:14px 2px;border-bottom:1px solid var(--line);text-decoration:none;color:var(--ink)}.toc-no{flex:0 0 auto;min-width:30px;font:600 12px 'IBM Plex Mono';letter-spacing:.04em;color:var(--brand)}.toc-text{flex:1 1 auto;display:flex;flex-direction:column;gap:2px}.toc-label{font:500 15.5px 'Fraunces',serif;letter-spacing:-.005em;color:var(--ink)}.toc-sub{font-size:12.5px;color:var(--muted)}.toc-row:hover .toc-label{color:var(--brand)}.toc{break-after:page}@media(max-width:640px){.score-gauge-card{grid-template-columns:1fr}.finding{padding-left:24px}.finding:before{left:12px}.toc-no{min-width:26px}}`;
 
 // PDF export renders the same document but skips the "embedded" web overrides
 // (rounded card, drop shadow, large outer margins) which fight with print
@@ -543,10 +601,10 @@ const docFootHtml = (branding = {}) => {
   return `<div class="doc-foot"><span><b>${name}</b> · AI-powered PPC audits</span><span>${right}</span></div>`;
 };
 
-export const renderReport = (doc, branding = {}) => `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AdAdviser Performance Audit</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet"><style>${premiumReportStyles}${embeddedReportOverrides}${premiumPolishOverrides}</style></head><body><div class="sheet">${renderMasthead(doc, branding)}${renderKeyNumbers(doc.key_numbers)}<div class="pad body-wrap">${renderExecutiveSummary(doc.executive_summary)}${(doc.sections || []).map(renderSection).join("")}${renderMethod(doc.method_notes)}${docFootHtml(branding)}</div></div></body></html>`;
+export const renderReport = (doc, branding = {}) => `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AdAdviser Performance Audit</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet"><style>${premiumReportStyles}${embeddedReportOverrides}${premiumPolishOverrides}</style></head><body><div class="sheet">${renderMasthead(doc, branding)}${renderKeyNumbers(doc.key_numbers)}<div class="pad body-wrap">${renderTableOfContents(doc)}${renderExecutiveSummary(doc.executive_summary)}${(doc.sections || []).map(renderSection).join("")}${renderMethod(doc.method_notes)}${docFootHtml(branding)}</div></div></body></html>`;
 
 export const renderReportForPdf = (doc, branding = {}) => {
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AdAdviser Performance Audit</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet"><style>${premiumReportStyles}${premiumPolishOverrides}${pdfOverrides}</style></head><body><div class="sheet">${renderMasthead(doc, branding)}${renderKeyNumbers(doc.key_numbers)}<div class="pad body-wrap">${renderExecutiveSummary(doc.executive_summary)}${(doc.sections || []).map(renderSection).join("")}${renderMethod(doc.method_notes)}${docFootHtml(branding)}</div></div></body></html>`;
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AdAdviser Performance Audit</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet"><style>${premiumReportStyles}${premiumPolishOverrides}${pdfOverrides}</style></head><body><div class="sheet">${renderMasthead(doc, branding)}${renderKeyNumbers(doc.key_numbers)}<div class="pad body-wrap">${renderTableOfContents(doc)}${renderExecutiveSummary(doc.executive_summary)}${(doc.sections || []).map(renderSection).join("")}${renderMethod(doc.method_notes)}${docFootHtml(branding)}</div></div></body></html>`;
 };
 
 export const renderAuditPremiumReportHtml = (audit, branding = {}) => renderReport(buildReportDocumentFromAudit(audit), branding);

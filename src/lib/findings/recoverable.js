@@ -140,7 +140,12 @@ export const geoMatchesEntity = (country, entityName) => {
   return tokens.some((t) => entityTokens.has(t));
 };
 
-export const CAMPAIGN_SCOPED = /^(CAMP-CPA|GOOGLE-AUD|GOOGLE-DEVICE|META-ADSET|TIKTOK-ADGROUP)/;
+// GOOGLE-BID-001 (an uncapped campaign over baseline) measures the SAME excess a
+// CAMP-CPA dispersion finding already counts for that campaign — fixing the cap
+// is just the mechanism to recover it. Scope it to the campaign so it reconciles
+// into the pool (net 0 "counted above") instead of stacking a second copy of the
+// same recoverable spend. (GOOGLE-BID-002 is advisory — excluded upstream.)
+export const CAMPAIGN_SCOPED = /^(CAMP-CPA|GOOGLE-AUD|GOOGLE-DEVICE|GOOGLE-BID-001|META-ADSET|TIKTOK-ADGROUP)/;
 export const GEO_SCOPED = /(GOOGLE|META)-GEO/;
 export const SEGMENT_SCOPED = /^SEG-WASTE/;
 // Audience/placement-type segment slices (placement, age, gender, device,
@@ -202,7 +207,9 @@ export const partitionRecoverable = (
 ) => {
   const quantified = (findings || [])
     .map((f) => ({ finding: f, amount: recoverableOf(f) }))
-    .filter((x) => x.amount > 0);
+    // Advisory guardrails (e.g. a bid-target gap) carry a CPA/target figure in
+    // their narrative but no recoverable spend — never let it be scraped in.
+    .filter((x) => x.amount > 0 && x.finding?.evidence?.advisory !== true);
 
   // Every quantified finding defaults to secondary/0; pool carriers get promoted.
   const roleOf = new Map(quantified.map((x) => [x.finding, { net: 0, role: "secondary" }]));
@@ -260,7 +267,13 @@ export const partitionRecoverable = (
         match.carrier = finding;
       }
     } else {
-      independents.push({ finding, amount });
+      // No campaign pool to merge into. A geo slice and a placement/age/region
+      // slice both re-cut the SAME account spend, so a stray geo finding joins
+      // the segment pool (counted ONCE via max) instead of stacking additively.
+      // Without this, a GB leak (geo) and an Instagram leak (placement) that are
+      // the same campaign's spend each counted in full — recoverable exceeded the
+      // account's recoverable-eligible spend.
+      audienceMembers.push({ finding, amount });
     }
   }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { reconcileRecoverable, geoMatchesEntity, COUNTRY_TOKENS } from "./recoverable.js";
+import { reconcileRecoverable, partitionRecoverable, geoMatchesEntity, COUNTRY_TOKENS } from "./recoverable.js";
 
 describe("COUNTRY_TOKENS — global geo→campaign matching", () => {
   it("matches campaigns named by code or full name across global markets", () => {
@@ -104,6 +104,56 @@ describe("reconcileRecoverable", () => {
     const { total, capped } = reconcileRecoverable(findings, { accountSpend: 257696 });
     expect(total).toBe(120977); // max(campaign 120,977, placement 88,033) — not summed
     expect(capped).toBe(false); // no longer slamming into the 60% cap
+  });
+
+  it("merges an uncapped-bidding finding into the campaign pool it shares (GOOGLE-BID-001)", () => {
+    // GOOGLE-BID-001 on PK 6/16 measures the SAME excess CAMP-CPA already counts
+    // for that campaign (fixing the cap is just the mechanism). It must reconcile
+    // to net 0 ("counted above"), not stack a second ~9k copy of the same money.
+    const findings = [
+      { ruleId: "CAMP-CPA-001", estimatedImpact: "PKR 12,939 is recoverable", evidence: { worstEntity: "PK | 6/16" } },
+      {
+        ruleId: "GOOGLE-BID-001",
+        estimatedImpact: "About PKR 9,198 is recoverable by constraining PK | 6/16's uncapped bidding toward the PKR 135 baseline.",
+        evidence: { campaign: "PK | 6/16" },
+      },
+    ];
+    const { total, assignments } = partitionRecoverable(findings, { accountSpend: 90125 });
+    expect(total).toBe(12939); // not 12,939 + 9,198 — same spend, counted once
+    const bid = assignments.find((a) => a.finding.ruleId === "GOOGLE-BID-001");
+    expect(bid.net).toBe(0);
+    expect(bid.role).toBe("secondary");
+  });
+
+  it("never scrapes an advisory guardrail's target figure into recoverable (GOOGLE-BID-002)", () => {
+    // A bid-target finding's text leads with the target CPA (PKR 95) — that is a
+    // goal, not recoverable spend. Marked advisory, it must contribute nothing.
+    const findings = [
+      { ruleId: "CAMP-CPA-001", estimatedImpact: "PKR 12,939 is recoverable", evidence: { worstEntity: "Display | PK" } },
+      {
+        ruleId: "GOOGLE-BID-002",
+        estimatedImpact: "Closing the gap between the PKR 95 target and the PKR 141 actual brings cost-per-conversion in line.",
+        evidence: { advisory: true, targetCpa: 95, actualCpa: 141 },
+      },
+    ];
+    const { total } = reconcileRecoverable(findings, { accountSpend: 90125 });
+    expect(total).toBe(12939); // the 95 target is NOT added
+  });
+
+  it("counts a geo leak and a placement leak once when no campaign pool exists (report-12 overlap)", () => {
+    // A messaging account whose only spending non-blocked campaign (Kingdom) ran
+    // entirely to GB. The GB geo leak (749) and the Instagram placement leak (728)
+    // are the SAME Kingdom spend, sliced two ways. With no CAMP-CPA pool to merge
+    // into, the geo finding used to land as an independent and STACK on the
+    // placement pool → 1,477 > the account's recoverable-eligible spend (~1,392).
+    const findings = [
+      { ruleId: "META-GEO-001", estimatedImpact: "PKR 749 delivered to GB -- recoverable", evidence: { country: "United Kingdom" } },
+      { ruleId: "SEG-WASTE-001", estimatedImpact: "PKR 728 in this segment is recoverable", evidence: { dimension: "placement", segment: "instagram" } },
+      { ruleId: "SEG-WASTE-001", estimatedImpact: "PKR 507 in this segment is recoverable", evidence: { dimension: "region", segment: "Punjab" } },
+    ];
+    const { total, overlapping } = reconcileRecoverable(findings, { accountSpend: 8482 });
+    expect(total).toBe(749); // max(749, 728, 507) — the same spend counted once
+    expect(overlapping).toBe(true);
   });
 
   it("still adds a temporal lever (day-of-week) on top of audience pools", () => {

@@ -104,4 +104,40 @@ describe("report money coherence", () => {
     const sum = moneyMap.blocks[0].rows.reduce((s, r) => s + moneyMagnitude(r.display), 0);
     expect(sum).toBeLessThanOrEqual(recoverable + 1);
   });
+
+  it("projects the reconciled recoverable, not the lead finding's narrative number", () => {
+    // The lead finding is the PKR 7,089 delivery BLOCK; recoverable is the PKR
+    // 3,188 waste. The projection must follow recoverable — never the 7,089 (or
+    // any baseline figure) scraped from the lead finding's text.
+    const proj = doc.executive_summary.projection;
+    expect(proj).toBeDefined();
+    expect(proj.period_value).toBe(recoverable);
+    expect(proj.period_value).toBe(3188);
+    expect(proj.quarterly).toBe(3188 * 3);
+    expect(proj.annualized).toBe(3188 * 12);
+  });
+});
+
+describe("report projection — diagnostic-only account", () => {
+  // A tracking-anomaly account: the lead finding is diagnostic (net-0 recoverable)
+  // and its narrative cites "PKR 115" (the baseline). The old projection scraped
+  // that 115 and projected PKR 1,380/yr of "opportunity" that recovers nothing.
+  const diagnosticOnly = [
+    {
+      ruleId: "TRACK-ANOMALY-001", platform: "META", severity: "CRITICAL",
+      title: "Conversions too cheap to be genuine", detail: "x",
+      estimatedImpact:
+        "The account's true baseline cost per result is PKR 115, not the PKR 54 the blended report shows.",
+      evidence: { diagnostic: true, netRecoverable: 0, confidence: "high" },
+    },
+  ];
+  const doc = buildReportDocumentFromAudit(audit(diagnosticOnly));
+
+  it("omits the projection entirely when nothing is recoverable", () => {
+    expect(doc.executive_summary.projection).toBeUndefined();
+  });
+
+  it("still leads the report with the diagnostic finding", () => {
+    expect(doc.masthead.headline).toMatch(/too cheap to be genuine/i);
+  });
 });

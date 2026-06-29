@@ -68,6 +68,16 @@ const DOMINANCE_SHARE = 0.9;
 // account, not this row. Treat it as unmeasured, never as recoverable waste.
 const IMPLAUSIBLE_CPA_MULTIPLE = 12;
 
+// Geo breakdowns under-attribute PARTIALLY and graduately, not only at the
+// extreme: a region can keep some of its conversions and lose others, landing at
+// a few× the baseline that looks like genuine dispersion. So geography gets a
+// tighter ceiling than the generic 12×. A capital city or major metro converting
+// 5×+ worse than the whole account, on a modest sample, is far more likely a
+// partial attribution drop than a real market that bad — and excluding it (plus
+// booking a recoverable number that isn't real) is the costlier error. Device/
+// placement/age attribute reliably, so they keep the generic ceiling.
+const GEO_IMPLAUSIBLE_CPA_MULTIPLE = 5;
+
 // The same artifact seen via shares: a segment holding a DOMINANT slice of the
 // dimension's SPEND but a microscopic slice of its CONVERSIONS is under-
 // attributed, not wasteful. (Punjab: ~47% of spend, <1% of attributed
@@ -78,6 +88,14 @@ const IMPLAUSIBLE_CPA_MULTIPLE = 12;
 // converts healthily overall, is it certainly an attribution drop, not waste.
 const MISATTRIB_MIN_SHARE = 0.4;
 const MISATTRIB_RATIO = 0.1; // conversion-share must be ≥10% of spend-share
+
+// A segment within this margin of the baseline is performing AT baseline —
+// normal dispersion, not recoverable waste. Without it, a segment only a few
+// percent over baseline (a placement at 1.04× baseline) sitting on large spend
+// mechanically books a big "wasted spend" number and can become the money-map
+// headline — advising the client to cut a placement that is actually fine. Waste
+// has to clear a real efficiency gap, not rounding noise.
+const WORSE_THAN_BASELINE_MARGIN = 1.2;
 
 // The share-based under-attribution guard applies ONLY to geographic breakdowns
 // (region/country/DMA/city). Those are the dimensions platforms under-attribute;
@@ -128,6 +146,7 @@ export const analyzeDimension = ({
     let wastedSpend = 0;
     let reason = "ok";
 
+    const isGeo = GEO_DIMENSION_RX.test(String(dimension || ""));
     const spendShare = dimensionSpend > 0 ? s.spend / dimensionSpend : 0;
     const conversionShare = dimensionConversions > 0 ? s.conversions / dimensionConversions : 0;
     // Dominance only means something when there are multiple segments to weigh
@@ -138,13 +157,16 @@ export const analyzeDimension = ({
     // spend → the breakdown under-attributed its results (the Punjab artifact).
     // Geo-only; other dimensions attribute reliably.
     const isUnderAttributed =
-      GEO_DIMENSION_RX.test(String(dimension || "")) &&
+      isGeo &&
       attributed &&
       summarized.length >= 2 &&
       spendShare >= MISATTRIB_MIN_SHARE &&
       conversionShare < spendShare * MISATTRIB_RATIO;
     // An impossible CPA = the same attribution artifact, caught per-segment.
-    const isImplausibleCpa = baseCpa != null && s.cpa != null && s.cpa > baseCpa * IMPLAUSIBLE_CPA_MULTIPLE;
+    // Geography gets a tighter ceiling (it under-attributes partially, so a few×
+    // baseline is already suspect); other dimensions attribute reliably.
+    const cpaCeiling = isGeo ? GEO_IMPLAUSIBLE_CPA_MULTIPLE : IMPLAUSIBLE_CPA_MULTIPLE;
+    const isImplausibleCpa = baseCpa != null && s.cpa != null && s.cpa > baseCpa * cpaCeiling;
 
     if (isDominant) {
       reason = "dominant_segment"; // the account itself — not waste
@@ -157,9 +179,11 @@ export const analyzeDimension = ({
     } else if (s.conversions === 0 && s.spend >= minSpend) {
       wastedSpend = s.spend;
       reason = "zero_conversions";
-    } else if (baseCpa != null && s.cpa != null && s.cpa > baseCpa) {
+    } else if (baseCpa != null && s.cpa != null && s.cpa > baseCpa * WORSE_THAN_BASELINE_MARGIN) {
       wastedSpend = round(s.spend * (1 - baseCpa / s.cpa));
       reason = "worse_than_baseline";
+    } else if (baseCpa != null && s.cpa != null && s.cpa > baseCpa) {
+      reason = "near_baseline"; // above baseline but within the margin — not waste
     }
 
     // Confidence: zero-conv verdict needs enough clicks; CPA verdict needs

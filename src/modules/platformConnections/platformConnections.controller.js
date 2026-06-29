@@ -28,6 +28,7 @@ import {
   buildMetaNormalizedDataset,
   normalizeBreakdownInsights,
   normalizeDailyInsights,
+  normalizeStructureOnlyCampaigns,
   resolveAccountFamilies,
 } from "./metaNormalizer.service.js";
 import {
@@ -742,6 +743,13 @@ export const fetchMetaDataForAudit = async (req, res) => {
 
   // Also include 90-day data in a byLevel bucket for historical rules
   normalizedDataset.data.platforms.META.byLevel.campaign_90d = campaigns90d;
+
+  // Campaigns that exist in the account but had zero delivery in the window are
+  // omitted by the insights endpoint. Capture them in a SEPARATE bucket (never
+  // merged into the spending set, so they can't skew any baseline) so the
+  // structural-hygiene rule can surface the clutter.
+  normalizedDataset.data.platforms.META.byLevel.campaignStructureOnly =
+    normalizeStructureOnlyCampaigns(campaignStructure, campaignInsights30d);
 
   // Persist to DB and update audit status
   await prisma.$transaction(async (tx) => {

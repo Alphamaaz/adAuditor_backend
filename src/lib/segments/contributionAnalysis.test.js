@@ -49,6 +49,62 @@ describe("analyzeDimension — attribution-artifact guards (the Punjab false pos
     expect(an.reason).toBe("zero_conversions");
     expect(an.wastedSpend).toBe(2000);
   });
+
+  it("does not book a region at ~6x baseline CPA as recoverable waste (Islamabad)", () => {
+    // Islamabad: real spend + a modest converting sample, but CPA ~6.3x the PKR
+    // 115 account baseline. Below the generic 12x ceiling, so it used to flag as
+    // PKR ~9k recoverable — almost certainly a partial geo attribution drop.
+    const regions = [
+      { segment: "Islamabad Capital Territory", spend: 10870, clicks: 1300, conversions: 15 }, // ~725 CPA
+      { segment: "Punjab", spend: 140000, clicks: 16000, conversions: 1100 }, // ~127 CPA
+      { segment: "Sindh", spend: 90000, clicks: 11000, conversions: 850 }, // ~106 CPA
+    ];
+    const out = analyzeDimension({ dimension: "region", records: regions, baselineCpa: 115 });
+    const isb = out.segments.find((s) => s.segment === "Islamabad Capital Territory");
+    expect(isb.wastedSpend).toBe(0);
+    expect(isb.reason).toBe("implausible_cpa");
+    expect(out.worst?.segment).not.toBe("Islamabad Capital Territory");
+  });
+
+  it("does not book a segment a few percent over baseline as waste (Instagram 1.04x)", () => {
+    // Instagram at PKR 120 vs a PKR 115 baseline = 1.04x — normal placement
+    // dispersion, not waste. On large spend it used to mechanically produce a
+    // ~PKR 2.4k "wasted" headline and advise cutting a fine placement.
+    const placements = [
+      { segment: "instagram", spend: 59643, clicks: 6000, conversions: 497 }, // ~120 CPA
+      { segment: "facebook", spend: 180000, clicks: 18000, conversions: 1600 }, // ~112 CPA
+    ];
+    const out = analyzeDimension({ dimension: "placement", records: placements, baselineCpa: 115 });
+    const ig = out.segments.find((s) => s.segment === "instagram");
+    expect(ig.wastedSpend).toBe(0);
+    expect(ig.reason).toBe("near_baseline");
+    expect(out.worst).toBeNull();
+  });
+
+  it("flags a segment that clears the materiality margin (~1.4x)", () => {
+    const placements = [
+      { segment: "audience_network", spend: 40000, clicks: 4000, conversions: 250 }, // 160 CPA = 1.39x
+      { segment: "facebook", spend: 180000, clicks: 18000, conversions: 1565 }, // ~115 CPA
+    ];
+    const out = analyzeDimension({ dimension: "placement", records: placements, baselineCpa: 115 });
+    const an = out.segments.find((s) => s.segment === "audience_network");
+    expect(an.reason).toBe("worse_than_baseline");
+    expect(an.wastedSpend).toBeGreaterThan(0);
+  });
+
+  it("still flags a genuine geo dispersion within the plausible range (~3x)", () => {
+    // A region at ~3x baseline on a real sample is plausible dispersion, not an
+    // artifact — geo guard must not over-suppress it.
+    const regions = [
+      { segment: "Balochistan", spend: 9000, clicks: 1100, conversions: 26 }, // ~346 CPA (3x)
+      { segment: "Punjab", spend: 140000, clicks: 16000, conversions: 1220 }, // ~115 CPA
+      { segment: "Sindh", spend: 90000, clicks: 11000, conversions: 800 }, // ~112 CPA
+    ];
+    const out = analyzeDimension({ dimension: "region", records: regions, baselineCpa: 115 });
+    const bal = out.segments.find((s) => s.segment === "Balochistan");
+    expect(bal.reason).toBe("worse_than_baseline");
+    expect(bal.wastedSpend).toBeGreaterThan(0);
+  });
 });
 
 describe("baselineCpa", () => {

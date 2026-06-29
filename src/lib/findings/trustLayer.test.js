@@ -175,6 +175,21 @@ describe.skipIf(corpusFiles.length === 0)("real-account corpus invariants", () =
           }
         }
       });
+
+      // A conversion-tracking anomaly, when present, must (a) be CRITICAL, (b) be
+      // diagnostic so it never claims recoverable dollars, and (c) carry a trusted
+      // baseline materially higher than the poisoned blended one.
+      it("any tracking anomaly is CRITICAL, diagnostic, and re-baselines upward", () => {
+        const anomalies = findings.filter((f) => f.ruleId === "TRACK-ANOMALY-001");
+        for (const f of anomalies) {
+          const e = f.evidence || {};
+          expect(f.severity).toBe("CRITICAL");
+          expect(e.diagnostic).toBe(true);
+          expect(e.netRecoverable || 0).toBe(0);
+          expect(e.trustedBaselineCpa).toBeGreaterThan(e.reportedBaselineCpa);
+          expect(e.distortion).toBeGreaterThanOrEqual(1.3);
+        }
+      });
     });
   }
 });

@@ -171,10 +171,10 @@ const reframeSecondary = (finding) => {
   const seg = ev.segment ? `The ${ev.segment} ${ev.dimension || "segment"}` : "This segment";
   const lensClause =
     cpa && base
-      ? `runs at ${cpa} vs the ${base} baseline${spend ? ` on ${spend} of spend` : ""}`
-      : "runs above baseline efficiency";
+      ? `has a ${cpa} cost per result vs the account's ${base} baseline cost per result${spend ? `, on ${spend} of spend` : ""}`
+      : "has a higher cost per result than the account baseline";
   finding.estimatedImpact =
-    `${seg} ${lensClause}. This is the ${ev.dimension || "audience"} view of inefficiency the campaign-level finding already counts — acting here captures part of that same recovery, it is not additional recoverable spend.`;
+    `${seg} ${lensClause}. This is the ${ev.dimension || "audience"} view of an inefficiency the campaign-level finding already counts — acting here recovers part of that same spend, not additional money.`;
   // Neutralise the title so it can't be mentally summed with the primary's dollar.
   // (Carries no standalone recoverable figure — the dimension lens, not a number.)
   if (ev.segment) {
@@ -209,7 +209,12 @@ export const applyTrustLayer = ({ findings, dataset } = {}) => {
   // upside / explanations, NOT recoverable waste — excluded from the pool (and
   // pinned to net 0) exactly as the report headline excludes them.
   const accountSpend = num(dataset?.summary?.totals?.spend);
-  const poolable = kept.filter((f) => f.evidence?.blocksDelivery !== true && f.evidence?.diagnostic !== true);
+  const poolable = kept.filter(
+    (f) =>
+      f.evidence?.blocksDelivery !== true &&
+      f.evidence?.diagnostic !== true &&
+      f.evidence?.advisory !== true
+  );
   const { assignments } = partitionRecoverable(poolable, { accountSpend });
   const byFinding = new Map(assignments.map((a) => [a.finding, a]));
 

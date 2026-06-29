@@ -71,6 +71,33 @@ describe("premium report renderer", () => {
     expect(first).toContain("Tuesday CPA");
   });
 
+  it("renders a clickable table of contents whose links all resolve to body anchors", () => {
+    const doc = buildReportDocumentFromAudit(baseAudit());
+    const html = renderReport(doc);
+
+    expect(html).toContain('id="table-of-contents"');
+    expect(html).toContain("What's in this report");
+    expect(html).toContain('href="#executive-summary"');
+
+    // Accuracy guard: every contents row must point at an id that exists in the
+    // body, so the TOC can never reference a section that didn't render.
+    const anchors = [...html.matchAll(/class="toc-row" href="#([^"]+)"/g)].map((m) => m[1]);
+    expect(anchors.length).toBeGreaterThanOrEqual(3);
+    for (const id of anchors) {
+      expect(html).toContain(`id="${id}"`);
+    }
+
+    // The first numbered section in the TOC must carry the "01" the body shows.
+    expect(html).toMatch(/<span class="toc-no">01<\/span>/);
+  });
+
+  it("omits the table of contents on a report with nothing to navigate", () => {
+    const doc = buildReportDocumentFromAudit(
+      baseAudit({ healthScore: 96, ruleFindings: [], categoryScores: { conversionTracking: 100 } })
+    );
+    expect(renderReport(doc)).not.toContain('id="table-of-contents"');
+  });
+
   it("does not render empty benchmark sections", () => {
     const html = renderAuditPremiumReportHtml(baseAudit());
     expect(html).not.toContain('id="benchmarks"');
@@ -156,11 +183,21 @@ describe("premium report renderer", () => {
           "Medium",
           "Not quantified",
         ],
+        [
+          "3",
+          "Meta CTR is 62.8% below a similar account in your portfolio",
+          "High",
+          "Needs review",
+        ],
       ],
     });
 
     expect(html).toContain("Meta CPM is critically above the B2B SaaS industry benchmark");
     expect(html).toContain("Paused Meta ad sets still have budgets assigned");
+    // A real "Meta <abbr> is <number>%" sentence must survive intact — the
+    // rule-code stripper used to eat the prefix and leave ".8% below…".
+    expect(html).toContain("Meta CTR is 62.8% below a similar account in your portfolio");
+    expect(html).not.toMatch(/>\s*\.8% below/);
     expect(html).toContain("PKR 2,245 recoverable");
     expect(html).toContain("Business risk");
     expect(html).not.toContain("<br>");
