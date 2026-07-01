@@ -168,17 +168,26 @@ const reframeSecondary = (finding) => {
   const cpa = ev.segmentCpaFormatted;
   const base = ev.baselineCpaFormatted;
   const spend = ev.spendFormatted;
-  const seg = ev.segment ? `The ${ev.segment} ${ev.dimension || "segment"}` : "This segment";
   const lensClause =
     cpa && base
       ? `has a ${cpa} cost per result vs the account's ${base} baseline cost per result${spend ? `, on ${spend} of spend` : ""}`
       : "has a higher cost per result than the account baseline";
-  finding.estimatedImpact =
-    `${seg} ${lensClause}. This is the ${ev.dimension || "audience"} view of an inefficiency the campaign-level finding already counts — acting here recovers part of that same spend, not additional money.`;
-  // Neutralise the title so it can't be mentally summed with the primary's dollar.
-  // (Carries no standalone recoverable figure — the dimension lens, not a number.)
   if (ev.segment) {
-    finding.title = `The ${ev.segment} ${ev.dimension || "segment"} is part of the same inefficiency (${ev.dimension || "audience"} view)`;
+    // A named segment slice (placement / age / region / audience) — the "{dim} view".
+    const dim = ev.dimension || "segment";
+    finding.estimatedImpact =
+      `The ${ev.segment} ${dim} ${lensClause}. This is the ${dim} view of an inefficiency the campaign-level finding already counts — acting here recovers part of that same spend, not additional money.`;
+    // Neutralise the title so it can't be mentally summed with the primary's dollar.
+    finding.title = `The ${ev.segment} ${dim} is part of the same inefficiency (${dim} view)`;
+  } else {
+    // A dimension-less / campaign-level finding overlapping the lead pool. NEVER
+    // call a campaign-level dispersion or a device slice an "audience view" — name
+    // the actual lens, or (for a campaign-level finding) just state plainly that
+    // the lead reallocation already carries this spend.
+    const lens = ev.device ? "device" : ev.country ? "geographic" : (ev.criterionId || ev.audienceType) ? "audience" : null;
+    finding.estimatedImpact = lens
+      ? `This ${lens} slice ${lensClause}. It is one view of an inefficiency the lead finding already counts — acting here recovers part of that same spend, not additional money.`
+      : `This is the same inefficiency the lead finding already counts — the reallocation finding above carries this spend, so acting here recovers part of that same spend, not additional money.`;
   }
 };
 

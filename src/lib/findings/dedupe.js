@@ -85,12 +85,33 @@ const foldGeoIntoCampaign = (findings) => {
 // driver and offers the location-targeting fix.
 const mergeGeoCause = (camp, geo) => {
   const country = geo.evidence?.country || "the leaking market";
-  const causeNote = ` The primary driver is geographic: spend is leaking to ${country}, which converts well below the account baseline — so correcting location targeting (set targeting to physical "Presence", and exclude ${country} if it is outside your intended market) is the root-cause fix, not an across-the-board campaign cut.`;
-  const geoFix =
-    (geo.fixSteps || []).find((s) => /presence|location|exclud|geo/i.test(s)) ||
-    `Review location settings and exclude ${country} if it is outside your intended market.`;
+  // If the under-performing country is the campaign's OWN target market (its name
+  // carries the country token), this is NOT a leak to exclude — it is the intended
+  // market converting below baseline. Excluding it would kill the campaign; the
+  // real fix is downstream (offer / landing page / funnel). Advising "exclude
+  // Pakistan" on a campaign literally named "PK" is the kind of wrong call an
+  // expert audit (which read this as a structural funnel issue) does not make.
+  const intendedMarket = geoMatchesEntity(country, campaignNameOf(camp));
+  // Intended-market case: the country is named in the campaign, so it CANNOT be a
+  // market to exclude (that would kill the campaign). Two real causes remain —
+  // (1) a "Presence or interest" setting leaking budget to users outside the
+  // country, or (2) the market genuinely converting below baseline (a downstream
+  // offer/landing-page/funnel issue, e.g. a structural access barrier). The
+  // defensive call checks targeting precision first, then points downstream —
+  // never "exclude {country}".
+  const causeNote = intendedMarket
+    ? ` The driver is geographic but tied to this campaign's own target market: ${country} is named in the campaign, so it is not a market to exclude. First confirm location targeting is "Presence" (not "Presence or interest"), which can leak budget to users outside ${country}; if targeting is already correct, the below-baseline cost is downstream — the offer, landing page, or funnel for ${country} — not a reason to cut the market.`
+    : ` The primary driver is geographic: spend is leaking to ${country}, which converts well below the account baseline — so correcting location targeting (set targeting to physical "Presence", and exclude ${country} if it is outside your intended market) is the root-cause fix, not an across-the-board campaign cut.`;
+  const geoFix = intendedMarket
+    ? `Confirm location targeting is "Presence" not "Presence or interest"; if it already is, fix the ${country} funnel downstream (offer, landing page, conversion path) rather than excluding the campaign's own target market.`
+    : (geo.fixSteps || []).find((s) => /presence|location|exclud|geo/i.test(s)) ||
+      `Review location settings and exclude ${country} if it is outside your intended market.`;
   const existingFix = camp.fixSteps || [];
-  const fixSteps = existingFix.some((s) => /presence|location|exclud|geo/i.test(s))
+  // Only suppress the appended step when a TARGETING/PRESENCE step already exists.
+  // (A generic "diagnose…landing page" dispersion step must not block the specific
+  // Presence-vs-interest guidance.)
+  const matcher = /presence|location targeting|exclud/i;
+  const fixSteps = existingFix.some((s) => matcher.test(s))
     ? existingFix
     : [...existingFix, geoFix];
 
@@ -98,12 +119,19 @@ const mergeGeoCause = (camp, geo) => {
     ...camp,
     detail: `${camp.detail || ""}${causeNote}`,
     rootCause: camp.rootCause
-      ? `${camp.rootCause} The dispersion is driven by a geographic leak to ${country}.`
-      : `The per-campaign CPA gap is driven by a geographic leak to ${country}, which converts below baseline.`,
+      ? `${camp.rootCause} ${
+          intendedMarket
+            ? `${country} is the campaign's own target market — the gap is targeting precision (Presence vs interest) or a downstream funnel issue, not a market to exclude.`
+            : `The dispersion is driven by a geographic leak to ${country}.`
+        }`
+      : intendedMarket
+        ? `${country} is this campaign's own target market — the below-baseline cost is targeting precision (Presence vs interest) or downstream (funnel/landing page), not a market to exclude.`
+        : `The per-campaign CPA gap is driven by a geographic leak to ${country}, which converts below baseline.`,
     evidence: {
       ...camp.evidence,
       geoCauseFolded: country,
       geoCauseFoldedFrom: geo.ruleId,
+      geoIntendedMarket: intendedMarket,
     },
     fixSteps,
   };

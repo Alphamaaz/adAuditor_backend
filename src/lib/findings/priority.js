@@ -56,19 +56,35 @@ export const isLowConfidence = (finding) => {
 export const blocksDelivery = (finding) => finding?.evidence?.blocksDelivery === true;
 
 /**
+ * Does this finding describe a structural call that should LEAD its severity band
+ * regardless of dollar magnitude? Reserved for root-cause reallocation findings
+ * — e.g. "you are live on your worst campaign while a proven winner sits paused"
+ * (GOOGLE-ALLOC-001). Re-enabling a proven winner is the single fastest CPA win
+ * there is, so it must outrank an equally-severe dispersion finding that merely
+ * carries a bigger raw recoverable figure (often a PAUSED campaign's historical
+ * waste). Without this, the larger-dollar dispersion finding wins the tiebreak
+ * and buries the actual lever — the exact complaint a client raised comparing us
+ * to an expert audit that led with the reallocation.
+ */
+export const leadsSeverityBand = (finding) =>
+  finding?.evidence?.leadsSeverityBand === true;
+
+/**
  * Composite leverage score — higher is more important. Banded so that:
  *   severity   → primary     (CRITICAL always above HIGH above MEDIUM above LOW)
  *   confidence → secondary   (confident findings above thin-sample ones)
  *   blocking   → tertiary    (a delivery block leads its severity band)
- *   dollars    → quaternary  (orders findings within a band; capped so a single
+ *   leads-band → quaternary  (a root-cause reallocation leads its band)
+ *   dollars    → quinary     (orders findings within a band; capped so a single
  *                             huge figure can never jump a higher band)
  */
 export const leverageScore = (finding) => {
   const sev = SEVERITY_WEIGHT[finding?.severity] || 1;
   const confident = isLowConfidence(finding) ? 0 : 1;
   const blocking = blocksDelivery(finding) ? 1 : 0;
+  const leads = leadsSeverityBand(finding) ? 1 : 0;
   const dollars = Math.min(parseImpactDollars(finding?.estimatedImpact), 1e10);
-  return sev * 1e15 + confident * 1e14 + blocking * 1e13 + dollars;
+  return sev * 1e15 + confident * 1e14 + blocking * 1e13 + leads * 1e12 + dollars;
 };
 
 /** Array.sort comparator: most important finding first. */

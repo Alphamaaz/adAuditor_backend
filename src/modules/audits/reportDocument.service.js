@@ -9,7 +9,7 @@ import {
   buildCohortBaselines,
   cohortBaselineFor,
 } from "../../lib/segments/cohortBaseline.js";
-import { getBenchmark, resolveBusinessType } from "./auditEngine.service.js";
+import { getBenchmark, resolveBusinessType, resolveGoogleNetwork } from "./auditEngine.service.js";
 
 /**
  * Account baseline + tracking-anomaly set, computed independently of the engine
@@ -430,7 +430,12 @@ const evidenceRows = (finding, currency = "USD", proseContext = "") => {
     }))
     .filter((row) => isShortEvidenceValue(row.value))
     .filter((row) => !proseContext || !proseContext.includes(row.value));
-  const amount = moneyMagnitude(finding.estimatedImpact || finding.evidence);
+  // Use the RECONCILED net, never a figure scraped from the narrative — an
+  // advisory/diagnostic finding mentions a target/CPA value that is not recovered
+  // money (e.g. "Closing the gap to the PKR 160 target" must not print
+  // "Recoverable spend PKR 160").
+  const amount =
+    isDiagnostic(finding) || finding.evidence?.advisory === true ? 0 : findingRecoverable(finding);
   if (amount > 0) rows.unshift({ metric: "Recoverable spend", value: formatMoney(amount, currency), highlight: true });
   return rows.slice(0, 6);
 };
@@ -614,18 +619,28 @@ const findingProofRows = (finding, currency) => {
   return rows;
 };
 
+// One short takeaway — ONLY when it carries a concrete number (recoverable money
+// or blocked delivery). The generic "removes account drag" / "high-leverage
+// optimization" lines added length without information on every card, so they are
+// dropped (caller skips the block when this returns null).
 const takeawayForFinding = (finding, currency) => {
-  if (isDiagnostic(finding)) {
-    return "What this means for you: this is a high-leverage optimization — fixing the driver moves cost-per-result toward your target without spending more.";
+  // Delivery blocks quote RESTORABLE spend from their own narrative (it lives in
+  // estimatedImpact, not netRecoverable — it isn't "recoverable waste").
+  if (finding.evidence?.blocksDelivery === true) {
+    const blocked = moneyMagnitude(finding.estimatedImpact || finding.evidence);
+    return blocked > 0
+      ? `What this means for you: fixing this restores ${formatMoney(blocked, currency)} of proven delivery that is currently blocked.`
+      : null;
   }
-  const amount = moneyMagnitude(finding.estimatedImpact || finding.evidence);
-  if (amount > 0) {
-    if (finding.evidence?.blocksDelivery === true) {
-      return `What this means for you: fixing this restores ${formatMoney(amount, currency)} of proven delivery that is currently blocked.`;
-    }
-    return `What this means for you: fixing this can recover ${formatMoney(amount, currency)} in the next comparable period.`;
-  }
-  return "What this means for you: fixing this removes account drag before it turns into measurable waste.";
+  // Everything else uses the RECONCILED net — never a number scraped from the
+  // narrative. A "counted above" / diagnostic / advisory finding nets to 0 and
+  // gets no recovery takeaway, so a placement finding that merely mentions its
+  // PKR 61 CPA can never claim "recover PKR 61".
+  if (isDiagnostic(finding) || finding.evidence?.advisory === true) return null;
+  const net = findingRecoverable(finding);
+  return net > 0
+    ? `What this means for you: fixing this can recover ${formatMoney(net, currency)} in the next comparable period.`
+    : null;
 };
 
 // The evidence-grounded "why" for a finding. Prefers the rule's own diagnosis
@@ -642,9 +657,11 @@ const whyText = (finding) => {
   if (reason === "worse_than_baseline") {
     return "This segment converts at a worse rate than the account baseline, so each result here costs more than it does elsewhere; the blended average hides the gap.";
   }
-  // No rule-level diagnosis available: be explicit about that rather than
-  // implying a cause the data doesn't support.
-  return "The evidence below isolates the pattern in the account data. Confirm the specific driver — targeting, creative, bidding, or tracking — against these figures before changing budgets.";
+  // No rule-level diagnosis available: emit NOTHING rather than a generic
+  // placeholder. A "Why it is happening" line that repeats the same hedge on every
+  // finding is the boilerplate a client flagged as long-winded — the caller skips
+  // the block when this returns null.
+  return null;
 };
 
 const findingBlock = (finding, currency = "USD") => {
@@ -655,15 +672,17 @@ const findingBlock = (finding, currency = "USD") => {
       type: "paragraph",
       text: `**What is happening:** ${finding.detail || finding.title}`,
     },
-    {
-      type: "paragraph",
-      text: `**Why it is happening:** ${whyText(finding)}`,
-    },
-    {
-      type: "paragraph",
-      text: `**Estimated business impact:** ${impact}`,
-    },
   ];
+  // "Why it is happening" only when the rule actually diagnosed a cause — no
+  // generic hedge repeated on every finding.
+  const why = whyText(finding);
+  if (why) {
+    bodyBlocks.push({ type: "paragraph", text: `**Why it is happening:** ${why}` });
+  }
+  bodyBlocks.push({
+    type: "paragraph",
+    text: `**Estimated business impact:** ${impact}`,
+  });
   const chart = chartForFinding(finding, currency);
   if (chart) {
     // Thread the account currency onto the chart block so the renderer formats
@@ -676,9 +695,12 @@ const findingBlock = (finding, currency = "USD") => {
   // Add a few context rows (recoverable, confidence) so it reads as a scorecard.
   const proofRows = findingProofRows(finding, currency);
   if (proofRows.length) {
-    const amount = moneyMagnitude(finding.estimatedImpact || finding.evidence);
+    // Reconciled net only — never a number scraped from the narrative (an advisory
+    // bid-target finding would otherwise print its target CPA as "Recoverable").
+    const amount =
+      isDiagnostic(finding) || finding.evidence?.advisory === true ? 0 : findingRecoverable(finding);
     const extras = [];
-    if (amount > 0 && !isDiagnostic(finding)) extras.push({ metric: "Recoverable spend", value: formatMoney(amount, currency), target: "—", status: "neutral" });
+    if (amount > 0) extras.push({ metric: "Recoverable spend", value: formatMoney(amount, currency), target: "—", status: "neutral" });
     const conf = finding.evidence?.confidence;
     if (conf) extras.push({ metric: "Confidence", value: cleanReportText(String(conf)), target: "—", status: "neutral" });
     bodyBlocks.push({ type: "scorecard", rows: [...proofRows, ...extras].slice(0, 6), currency });
@@ -686,11 +708,10 @@ const findingBlock = (finding, currency = "USD") => {
     const rows = evidenceRows(finding, currency, proseContext);
     if (rows.length) bodyBlocks.push({ type: "evidence_table", rows, proseContext, currency });
   }
-  bodyBlocks.push({
-    type: "paragraph",
-    text: "**Expected outcome after fixing:** spend should shift away from the flagged weakness and performance should move closer to the account baseline.",
-  });
-  bodyBlocks.push({ type: "takeaway", text: takeawayForFinding(finding, currency) });
+  // (Removed the static "Expected outcome after fixing" line — it repeated the
+  // same sentence on every finding without adding information.)
+  const takeaway = takeawayForFinding(finding, currency);
+  if (takeaway) bodyBlocks.push({ type: "takeaway", text: takeaway });
 
   return {
     type: "finding",
@@ -766,8 +787,11 @@ const accountScorecardSection = (audit, currency, totals) => {
     { metric: "Conversions", value: Math.round(conversions).toLocaleString("en-US"), target: "—", status: "neutral" },
   ];
 
-  // CTR vs industry benchmark (higher is better).
-  const ctrBench = getBenchmark("ctr", platform, businessType);
+  // CTR vs industry benchmark (higher is better). For Google, benchmark against
+  // the account's dominant NETWORK (Search vs Display/…) so a Display account's
+  // naturally-low CTR isn't scored against a Search bar.
+  const scNetwork = platform === "GOOGLE" ? resolveGoogleNetwork(audit.normalizedDataset) : null;
+  const ctrBench = getBenchmark("ctr", platform, businessType, scNetwork);
   if (ctr != null && ctrBench) {
     let status = "bad";
     let label = "Below benchmark";
@@ -1043,7 +1067,8 @@ const campaignCardsSection = (audit, currency, totals, scope) => {
   const targetCpa =
     num(sectionA.targetCpa) ||
     num(audit.normalizedDataset?.summary?.platforms?.[platform]?.inferredTargetCpa);
-  const ctrBench = getBenchmark("ctr", platform, businessType);
+  const ccNetwork = platform === "GOOGLE" ? resolveGoogleNetwork(audit.normalizedDataset) : null;
+  const ctrBench = getBenchmark("ctr", platform, businessType, ccNetwork);
   // Per-conversion-type baselines (anomalies excluded) — a campaign's cost is
   // judged against peers buying the same kind of result, not a blended average.
   const cohorts = buildCohortBaselines(all.filter((c) => !anomalyNames.has(normName(c.name))));
@@ -1359,6 +1384,320 @@ const noFindingsDocument = ({ audit, currency, totals }) => ({
   ],
 });
 
+// ── Dimensional breakdown tables ──────────────────────────────────────────────
+// Owned per-dimension tables (geo, device, audience segment, funnel CVR) that a
+// senior audit presents as their own sections — matching the reference expert
+// report. Each reads directly from the normalized dataset and returns null when
+// the underlying grain wasn't pulled, so a thin account degrades gracefully.
+
+const MAX_DIM_ROWS = 12;
+// A campaign needs at least this many clicks for its CVR to be a meaningful funnel
+// signal (below it, CVR is small-sample noise — a test campaign with 8 clicks).
+const MIN_FUNNEL_CLICKS = 50;
+
+// Collect records at a byLevel grain across every platform.
+const recordsAtLevel = (audit, level) => {
+  const platforms = audit.normalizedDataset?.data?.platforms || {};
+  const out = [];
+  for (const p of Object.values(platforms)) {
+    for (const r of p?.byLevel?.[level] || []) out.push(r);
+  }
+  return out;
+};
+
+const cpaCell = (spend, conv, currency) =>
+  conv > 0 ? formatMoney(spend / conv, currency) : "—";
+const pctCell = (n, d) => (d > 0 ? `${((n / d) * 100).toFixed(2)}%` : "—");
+
+// Geographic breakdown — country × campaign, flags the intended-market vs leak
+// distinction in the note so the reader never reads "convert poorly" as "exclude".
+const geoBreakdownSection = (audit, currency, totals) => {
+  const recs = recordsAtLevel(audit, "geo");
+  if (recs.length < 2) return null;
+  const baseCpa = num(totals.conversions) > 0 ? num(totals.spend) / num(totals.conversions) : null;
+  const rows = recs
+    .map((r) => ({
+      country: r.country || r.countryId || "—",
+      campaign: r.campaignName || "—",
+      spend: num(r.spend),
+      conv: num(r.conversions ?? r.results),
+      clicks: num(r.clicks),
+    }))
+    .filter((r) => r.spend > 0)
+    .sort((a, b) => b.spend - a.spend)
+    .slice(0, MAX_DIM_ROWS);
+  if (rows.length < 2) return null;
+  const tableRows = rows.map((r) => {
+    const cpa = r.conv > 0 ? r.spend / r.conv : null;
+    let note = "On baseline";
+    if (r.conv === 0) note = "Zero conversions";
+    else if (baseCpa && cpa >= baseCpa * 2) note = `${(cpa / baseCpa).toFixed(1)}× baseline`;
+    else if (baseCpa && cpa <= baseCpa) note = "At/under baseline";
+    return [r.country, r.campaign, formatMoney(r.spend, currency), String(Math.round(r.conv)), cpaCell(r.spend, r.conv, currency), note];
+  });
+  return {
+    id: "geo-breakdown",
+    eyebrow: "Geographic",
+    title: "Where the spend lands, by market",
+    intro: "Spend and cost per result by country. A market named in the campaign is intended — a high cost there is a funnel/targeting-precision issue, not a market to exclude.",
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Country", align: "left" },
+          { header: "Campaign", align: "left" },
+          { header: "Spend", align: "right", width: "96px" },
+          { header: "Results", align: "right", width: "70px" },
+          { header: "Cost / result", align: "right", width: "104px" },
+          { header: "Note", align: "left", width: "120px" },
+        ],
+        currency,
+        rows: tableRows,
+        footnote: "Cost per result uses each market's own conversions; the note compares it to the account baseline.",
+      },
+    ],
+  };
+};
+
+// Device breakdown — campaign × device, surfaces zero-conversion waste AND an
+// over-performing device as a scale opportunity (the reference's IND-tablet call).
+const deviceBreakdownSection = (audit, currency, totals) => {
+  const recs = recordsAtLevel(audit, "device");
+  if (recs.length < 2) return null;
+  const baseCpa = num(totals.conversions) > 0 ? num(totals.spend) / num(totals.conversions) : null;
+  const rows = recs
+    .map((r) => ({
+      campaign: r.campaignName || "—",
+      device: r.device || r.deviceType || "—",
+      spend: num(r.spend),
+      conv: num(r.conversions ?? r.results),
+    }))
+    .filter((r) => r.spend > 0)
+    .sort((a, b) => b.spend - a.spend)
+    .slice(0, MAX_DIM_ROWS);
+  if (rows.length < 2) return null;
+  const tableRows = rows.map((r) => {
+    const cpa = r.conv > 0 ? r.spend / r.conv : null;
+    let note = "On baseline";
+    if (r.conv === 0) note = `${formatMoney(r.spend, currency)} wasted`;
+    else if (baseCpa && cpa <= baseCpa * 0.75) note = "Beats baseline — scale";
+    else if (baseCpa && cpa >= baseCpa * 2) note = "Well over baseline";
+    return [r.campaign, r.device, formatMoney(r.spend, currency), String(Math.round(r.conv)), cpaCell(r.spend, r.conv, currency), note];
+  });
+  return {
+    id: "device-breakdown",
+    eyebrow: "Device",
+    title: "How each device converts",
+    intro: "Cost per result by device. Zero-conversion devices are pure waste (exclude them); a device beating baseline is a scale opportunity.",
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Campaign", align: "left" },
+          { header: "Device", align: "left", width: "84px" },
+          { header: "Spend", align: "right", width: "96px" },
+          { header: "Results", align: "right", width: "70px" },
+          { header: "Cost / result", align: "right", width: "104px" },
+          { header: "Note", align: "left", width: "128px" },
+        ],
+        currency,
+        rows: tableRows,
+        footnote: "A device modifier concentrates budget on what converts; set −100% on zero-conversion devices.",
+      },
+    ],
+  };
+};
+
+// Audience-by-segment — the reference's Section 4.1: the SAME segment id across
+// campaigns/markets, with CVR and cost per result, proving misapplication.
+const audienceSegmentSection = (audit, currency) => {
+  const recs = recordsAtLevel(audit, "audience_performance");
+  if (recs.length < 2) return null;
+  const rows = recs
+    .map((r) => ({
+      segment: r.criterionId || r.audienceId || r.segment || "—",
+      campaign: r.campaignName || r.adGroupName || "—",
+      spend: num(r.spend),
+      clicks: num(r.clicks),
+      conv: num(r.conversions ?? r.results),
+    }))
+    .filter((r) => r.spend > 0 || r.clicks > 0)
+    .sort((a, b) => b.spend - a.spend)
+    .slice(0, MAX_DIM_ROWS);
+  if (rows.length < 2) return null;
+  const tableRows = rows.map((r) => [
+    String(r.segment),
+    r.campaign,
+    String(Math.round(r.clicks)),
+    String(Math.round(r.conv)),
+    pctCell(r.conv, r.clicks),
+    cpaCell(r.spend, r.conv, currency),
+  ]);
+  return {
+    id: "audience-segments",
+    eyebrow: "Audience",
+    title: "The same audience, campaign by campaign",
+    intro: "Conversion rate and cost per result for each audience segment. When one segment id converts well in one campaign and collapses in another, the audience is mis-applied — not the creative.",
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Segment", align: "left" },
+          { header: "Campaign", align: "left" },
+          { header: "Clicks", align: "right", width: "72px" },
+          { header: "Results", align: "right", width: "70px" },
+          { header: "CVR", align: "right", width: "72px" },
+          { header: "Cost / result", align: "right", width: "104px" },
+        ],
+        currency,
+        rows: tableRows,
+        footnote: "CVR = conversions ÷ clicks. A strong CVR in one campaign and a weak one in another on the same segment points to misapplication.",
+      },
+    ],
+  };
+};
+
+// Funnel / destination — the core "is it the ad or the funnel?" table. Per
+// campaign: the CVR needed to hit target (CPC ÷ target CPA) vs the actual CVR.
+// A healthy CTR but an actual CVR far below required localizes the loss DOWNSTREAM
+// of the click (offer / landing page / funnel), per market — the reference's
+// Section 8. Needs a target CPA (declared or inferred).
+const funnelCvrSection = (audit, currency, totals) => {
+  const platform = audit.selectedPlatforms?.[0] || "GOOGLE";
+  const sectionA = audit.businessProfileSnapshot?.sectionA || {};
+  const declared = num(sectionA.targetCpa);
+  const inferred = num(audit.normalizedDataset?.summary?.platforms?.[platform]?.inferredTargetCpa);
+  const target = declared > 0 ? declared : inferred;
+  if (!(target > 0)) return null;
+
+  // Only campaigns with a real click sample belong in a CVR comparison — a
+  // 5-to-8-click test campaign gives a meaningless CVR (5 conv / 8 clicks = 62%)
+  // and produces noise rows. Require a minimum click volume.
+  const campaigns = recordsAtLevel(audit, "campaign").filter(
+    (c) => num(c.spend) > 0 && num(c.clicks) >= MIN_FUNNEL_CLICKS
+  );
+  if (campaigns.length < 1) return null;
+
+  // The funnel must never require a CVR that even the MOST EFFICIENT campaign
+  // can't hit. When the declared target is below every campaign's achieved cost
+  // per result (an unrealistic target — e.g. a PKR 40 target on an account whose
+  // best campaign runs at PKR 84), measuring "CVR needed" against it brands EVERY
+  // campaign — including the proven winner — "downstream", which flatly
+  // contradicts the lead ("re-enable this winner"). So measure against the
+  // achievable floor: max(target, best achieved CPA).
+  const achievedCpas = campaigns
+    .map((c) => {
+      const conv = num(c.results ?? c.conversions);
+      return conv > 0 ? num(c.spend) / conv : null;
+    })
+    .filter((v) => v != null && v > 0);
+  const bestCpa = achievedCpas.length ? Math.min(...achievedCpas) : null;
+  const effectiveTarget = bestCpa != null ? Math.max(target, bestCpa) : target;
+  const targetOverridden = bestCpa != null && bestCpa > target;
+
+  const rows = campaigns
+    .map((c) => {
+      const spend = num(c.spend);
+      const clicks = num(c.clicks);
+      const conv = num(c.results ?? c.conversions);
+      const cpc = clicks > 0 ? spend / clicks : null;
+      const requiredCvr = cpc != null && effectiveTarget > 0 ? cpc / effectiveTarget : null; // CPC / achievable CPA
+      const actualCvr = clicks > 0 ? conv / clicks : null;
+      return { name: c.name || "—", cpc, requiredCvr, actualCvr };
+    })
+    // Exclude campaigns whose required CVR exceeds 100%: when CPC ≥ target CPA, no
+    // conversion rate can hit the target, so it's a CPC/bidding ceiling, not a
+    // funnel/landing-page gap — labeling it "downstream" would point at the wrong
+    // lever (surfaced e.g. "CVR needed 830%" on a PKR 332-CPC test campaign).
+    .filter((r) => r.cpc != null && r.requiredCvr != null && r.requiredCvr <= 1 && r.actualCvr != null)
+    .sort((a, b) => a.actualCvr / a.requiredCvr - b.actualCvr / b.requiredCvr)
+    .slice(0, MAX_DIM_ROWS);
+  if (rows.length < 1) return null;
+
+  let anyDownstream = false;
+  const tableRows = rows.map((r) => {
+    const ratio = r.requiredCvr > 0 ? r.actualCvr / r.requiredCvr : 1;
+    let verdict = "Funnel converts";
+    if (ratio < 0.5) { verdict = `${(1 / Math.max(ratio, 0.001)).toFixed(1)}× short — downstream`; anyDownstream = true; }
+    else if (ratio < 0.9) { verdict = "Below required — check funnel"; anyDownstream = true; }
+    else if (ratio >= 1) verdict = "Meets/beats required";
+    return [
+      r.name,
+      // CPC is a small value where whole-currency rounding loses meaning
+      // (PKR 2.56 → "PKR 3"), so show two decimals here specifically.
+      `${String(currency || "USD").toUpperCase()} ${r.cpc.toFixed(2)}`,
+      `${(r.requiredCvr * 100).toFixed(2)}%`,
+      `${(r.actualCvr * 100).toFixed(2)}%`,
+      verdict,
+    ];
+  });
+
+  const targetPhrase = targetOverridden
+    ? `an achievable ${formatMoney(effectiveTarget, currency)} cost per result — your ${formatMoney(target, currency)} target is below every campaign's achieved cost per result, so the funnel is measured against the most efficient campaign, not an unreachable target`
+    : `the ${formatMoney(target, currency)} target`;
+  const intro = anyDownstream
+    ? `The conversion rate each campaign needs to hit ${targetPhrase}, versus what it actually gets. Where clicks are healthy but the actual CVR is far below required, the loss is downstream of the click — the offer, landing page, or funnel — not the ad or the bid. If the same offer converts in one market and collapses in another, the barrier is structural to that market.`
+    : `The conversion rate each campaign needs to hit ${targetPhrase}, versus what it actually gets. Every campaign is at or near the required rate — the funnel is converting.`;
+
+  return {
+    id: "funnel-cvr",
+    eyebrow: "Funnel / destination",
+    title: "Is the gap in the ad, or downstream?",
+    intro,
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Campaign", align: "left" },
+          { header: "CPC", align: "right", width: "84px" },
+          { header: "CVR needed", align: "right", width: "96px" },
+          { header: "Actual CVR", align: "right", width: "92px" },
+          { header: "Verdict", align: "left" },
+        ],
+        currency,
+        rows: tableRows,
+        footnote: "CVR needed = CPC ÷ target CPA. A healthy CTR with an actual CVR far below the required rate points downstream (landing page / offer / tracking), not to the ads.",
+      },
+    ],
+  };
+};
+
+// Opportunities & account hygiene — the forward-looking "what to build / clean
+// up next" section, separated from the problems so the report isn't a pure
+// complaint sheet (the reference's Governance / Market-coverage sections). Built
+// ONLY from opportunity/hygiene findings the engine actually detected — never
+// from an assumed-absent best practice we can't verify from the data.
+const OPPORTUNITY_RX = /^(OPP|GOOGLE-HYGIENE|GOOGLE-EXT|META-HYGIENE|COMP-OPP)/;
+const opportunitiesSection = (findings, currency) => {
+  const opps = findings.filter((f) => OPPORTUNITY_RX.test(f.ruleId || ""));
+  if (opps.length < 1) return null;
+  const rows = opps.slice(0, 8).map((f) => {
+    const move =
+      (Array.isArray(f.fixSteps) && f.fixSteps[0]) ||
+      f.estimatedImpact ||
+      "Review and action this in the platform.";
+    return [f.title, cleanReportText(String(move)).slice(0, 160)];
+  });
+  return {
+    id: "opportunities",
+    eyebrow: "Opportunities & hygiene",
+    title: "Growth levers and cleanup, beyond the fixes",
+    intro: "Forward-looking moves and account hygiene the engine detected — the build-and-clean-up work that compounds once the urgent leaks are fixed. Only items grounded in the account data appear here.",
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Opportunity", align: "left" },
+          { header: "First move", align: "left" },
+        ],
+        currency,
+        rows,
+        footnote: "These are growth/hygiene levers, not measured leaks — sequenced after the recoverable-spend fixes.",
+      },
+    ],
+  };
+};
+
 export const buildReportDocumentFromAudit = (audit) => {
   // A cached premiumReport is built during AI report generation with only the
   // dataset SUMMARY (no per-campaign records), so it lacks the campaign
@@ -1540,6 +1879,18 @@ export const buildReportDocumentFromAudit = (audit) => {
   const campaignCards = campaignCardsSection(audit, currency, totals, scope);
   if (campaignCards) sections.push(campaignCards);
 
+  // Dimensional breakdowns — the owned per-dimension sections a senior audit
+  // presents (geo, device, audience, funnel). Each is null when its grain wasn't
+  // pulled, so a summary-only or thin account simply omits it.
+  const funnel = funnelCvrSection(audit, currency, totals);
+  if (funnel) sections.push(funnel);
+  const geoBreak = geoBreakdownSection(audit, currency, totals);
+  if (geoBreak) sections.push(geoBreak);
+  const deviceBreak = deviceBreakdownSection(audit, currency, totals);
+  if (deviceBreak) sections.push(deviceBreak);
+  const audienceSeg = audienceSegmentSection(audit, currency);
+  if (audienceSeg) sections.push(audienceSeg);
+
   sections.push({
     id: "finding-detail",
     eyebrow: "Evidence",
@@ -1565,6 +1916,11 @@ export const buildReportDocumentFromAudit = (audit) => {
       })),
     });
   }
+
+  // Opportunities & hygiene — forward-looking growth/cleanup levers, framed
+  // separately from the problems so the report isn't a pure complaint sheet.
+  const opportunities = opportunitiesSection(findings, currency);
+  if (opportunities) sections.push(opportunities);
 
   // Phased strategic roadmap — sits after the evidence/benchmarks, before the
   // week-one action checklist renders.
@@ -1643,7 +1999,7 @@ export const buildReportDocumentFromAudit = (audit) => {
             text: `Figures cover all ${scope.active.length + scope.paused.length} campaigns that spent this period. The Active vs Paused breakdown splits the total: ${formatMoney(scope.activeTotals.spend, currency)} from ${scope.active.length} active campaign${scope.active.length === 1 ? "" : "s"} and ${formatMoney(scope.pausedTotals.spend, currency)} from ${scope.paused.length} paused. The per-campaign comparison and recommendations focus on the active set, which is what can still be optimised.`,
           }]
         : !scope.hasActive && scope.hasPaused
-          ? [{ label: "Scope", text: "Every campaign was paused during this period, so the figures cover all campaigns — there is no active set to isolate." }]
+          ? [{ label: "Scope", text: "The campaigns that spent this period are now paused — none is currently delivering, so there is no live set to isolate. The figures cover all of them; the recommendations are about what to re-enable or restructure, not a live budget to optimise." }]
           : []),
       { label: "Benchmarks", text: validBenchmarkComparisons.length ? "Peer, historical, or industry comparisons are shown only where available." : "No benchmark section is rendered because no benchmark facts were available." },
       { label: "Confidence", text: "Confidence labels reflect data coverage, severity, and sample notes." },

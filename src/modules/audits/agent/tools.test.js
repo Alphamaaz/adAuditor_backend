@@ -136,7 +136,7 @@ describe("createDeepAuditTools", () => {
 
     it("reports the benchmark-relative diagnosis alongside (CTR healthy vs the low industry floor)", () => {
       const out = tools().decomposeKpi({ kpi: "CPA" });
-      // vs the Lead Gen benchmark (warning 0.6%), Essa's 3.96% CTR is fine — so
+      // vs the Lead Gen benchmark (good 1.6% / warning 0.8%), Essa's 3.96% CTR is fine — so
       // the benchmark diagnosis blames conversion rate, even though vs the peer
       // CTR is the lever. Both references are honest; this locks the units.
       expect(out.diagnosis.dominantDriver).toBe("conversion_rate");
@@ -235,7 +235,8 @@ describe("createDeepAuditTools", () => {
       const out = tools().getBenchmark({ metric: "ctr" });
       expect(out.available).toBe(true);
       expect(out.platform).toBe("META");
-      expect(out.band.good).toBe(1.2);
+      // Calibrated 2026-07-01 to 2025 Meta median CTR (~2.19%): Lead Gen good = 1.6.
+      expect(out.band.good).toBe(1.6);
     });
   });
 

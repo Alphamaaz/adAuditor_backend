@@ -104,8 +104,11 @@ describe("collapseOverlappingFindings — geo folded into its campaign", () => {
     expect(out[0].evidence.geoCauseFolded).toBe("Pakistan");
     expect(out[0].evidence.geoCauseFoldedFrom).toBe("GOOGLE-GEO-001");
     expect(out[0].detail).toMatch(/Pakistan/);
-    expect(out[0].rootCause).toMatch(/geographic leak to Pakistan/i);
-    // Location fix carried over.
+    // Pakistan IS this campaign's own target market ("Display | PK …"), so the
+    // fold must NOT advise excluding it — it reframes to targeting-precision
+    // (Presence vs interest) / downstream funnel, never "exclude Pakistan".
+    expect(out[0].rootCause).toMatch(/target market|downstream|funnel|presence/i);
+    // Targeting/location guidance carried over (Presence check retained).
     expect(out[0].fixSteps.some((s) => /presence|location/i.test(s))).toBe(true);
   });
 

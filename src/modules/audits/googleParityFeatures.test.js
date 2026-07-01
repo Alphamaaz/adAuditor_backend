@@ -96,6 +96,58 @@ describe("Google audience fragmentation", () => {
   });
 });
 
+describe("Google budget allocation — live on a weaker campaign while a winner is paused", () => {
+  const allocAudit = (campaigns) => ({
+    id: "aud_alloc",
+    selectedPlatforms: ["GOOGLE"],
+    dataSource: "OAUTH",
+    businessProfileSnapshot: { sectionA: { businessType: "Lead Gen", currency: "PKR", targetCpa: 80 } },
+    intakeResponses: [{ section: "PLATFORM_GOOGLE", answers: {} }],
+    uploadReadiness: { mode: "FULL" },
+    normalizedDataset: {
+      summary: {
+        totals: { spend: 60000, conversions: 450, currency: "PKR" },
+        platforms: { GOOGLE: { spend: 60000, conversions: 450, clicks: 18000, impressions: 300000, currency: "PKR" } },
+      },
+      data: { platforms: { GOOGLE: { records: [], byLevel: { campaign: campaigns }, byDimension: {}, byDay: [] } } },
+    },
+  });
+
+  it("fires when the only live campaign is far worse than a proven paused winner", () => {
+    const { findings } = runDeterministicAudit(
+      allocAudit([
+        { level: "campaign", name: "PK - Live", status: "ENABLED", spend: 19000, conversions: 55, clicks: 7400, cpa: 345 },
+        { level: "campaign", name: "BD - Winner", status: "PAUSED", spend: 31000, conversions: 370, clicks: 10000, cpa: 84 },
+      ])
+    );
+    const f = findings.find((x) => x.ruleId === "GOOGLE-ALLOC-001");
+    expect(f).toBeDefined();
+    expect(f.severity).toBe("CRITICAL");
+    expect(f.evidence.pausedWinner).toBe("BD - Winner");
+    expect(f.evidence.liveCampaign).toBe("PK - Live");
+  });
+
+  it("does NOT fire when the live campaigns are the winners (paused one is worse)", () => {
+    const { findings } = runDeterministicAudit(
+      allocAudit([
+        { level: "campaign", name: "BD - Live winner", status: "ENABLED", spend: 31000, conversions: 370, clicks: 10000, cpa: 84 },
+        { level: "campaign", name: "PK - Paused loser", status: "PAUSED", spend: 19000, conversions: 15, clicks: 7400, cpa: 1233 },
+      ])
+    );
+    expect(findings.find((x) => x.ruleId === "GOOGLE-ALLOC-001")).toBeUndefined();
+  });
+
+  it("does NOT fire when nothing is live", () => {
+    const { findings } = runDeterministicAudit(
+      allocAudit([
+        { level: "campaign", name: "A", status: "PAUSED", spend: 31000, conversions: 370, clicks: 10000, cpa: 84 },
+        { level: "campaign", name: "B", status: "PAUSED", spend: 19000, conversions: 55, clicks: 7400, cpa: 345 },
+      ])
+    );
+    expect(findings.find((x) => x.ruleId === "GOOGLE-ALLOC-001")).toBeUndefined();
+  });
+});
+
 describe("Google dead-campaign hygiene", () => {
   it("flags zero-delivery campaign clutter", () => {
     const { findings } = runDeterministicAudit(googleAudit({ campaigns: [...liveCampaigns, ...deadCampaigns] }));

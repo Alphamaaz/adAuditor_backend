@@ -94,7 +94,9 @@ describe("active vs paused scope in the report", () => {
     ]);
     const built = buildReportDocumentFromAudit(doc);
     expect(breakdownRows(built)).toBeUndefined(); // no active cohort to split against
-    expect(scopeNote(built)).toMatch(/every campaign was paused/i);
+    // The campaigns DID spend this period — they're just paused now. The note must
+    // say that, not "paused during this period" (which reads as if nothing ran).
+    expect(scopeNote(built)).toMatch(/spent this period are now paused|none is currently delivering/i);
     const dd = built.sections.find((s) => s.id === "campaign-deep-dive");
     expect(dd.blocks[0].rows).toHaveLength(2); // still shows them
   });

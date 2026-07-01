@@ -145,9 +145,18 @@ export const geoMatchesEntity = (country, entityName) => {
 // is just the mechanism to recover it. Scope it to the campaign so it reconciles
 // into the pool (net 0 "counted above") instead of stacking a second copy of the
 // same recoverable spend. (GOOGLE-BID-002 is advisory — excluded upstream.)
-export const CAMPAIGN_SCOPED = /^(CAMP-CPA|GOOGLE-AUD|GOOGLE-DEVICE|GOOGLE-BID-001|META-ADSET|TIKTOK-ADGROUP)/;
+// GOOGLE-ALLOC-001 (live on a weak campaign while a proven winner sits paused)
+// quantifies the reallocation gap on the SAME live-campaign spend a CAMP-CPA
+// dispersion finding measures for that campaign — the same rupees, framed as
+// "re-enable the winner" instead of "bring this campaign to baseline". Scope it
+// to the campaign so the larger of the two carries the pool and the other nets to
+// 0 ("counted above"), never stacking a second copy of the same recoverable spend.
+export const CAMPAIGN_SCOPED = /^(CAMP-CPA|GOOGLE-AUD|GOOGLE-DEVICE|GOOGLE-BID-001|GOOGLE-ALLOC|META-ADSET|TIKTOK-ADGROUP)/;
 export const GEO_SCOPED = /(GOOGLE|META)-GEO/;
 export const SEGMENT_SCOPED = /^SEG-WASTE/;
+// Search-term waste is a query-level slice of campaign spend → pooled with the
+// campaign inefficiency (counted once), not a distinct additive lever.
+export const SEARCH_TERM_SCOPED = /^GOOGLE-SEARCH-TERM/;
 // Audience/placement-type segment slices (placement, age, gender, device,
 // region) are re-slices of the SAME spend the campaign dispersion already
 // measures — the same rupees, cut by audience instead of by campaign. They merge
@@ -282,7 +291,9 @@ export const partitionRecoverable = (
   for (const { finding, amount } of quantified) {
     const rid = finding.ruleId || "";
     if (CAMPAIGN_SCOPED.test(rid) || GEO_SCOPED.test(rid)) continue;
-    if (isAudienceSegment(finding)) {
+    // Search-term waste is a query-level slice of the SAME campaign spend the
+    // dispersion already measures — pool it (counted once via max), never additive.
+    if (isAudienceSegment(finding) || SEARCH_TERM_SCOPED.test(rid)) {
       audienceMembers.push({ finding, amount });
     } else {
       independents.push({ finding, amount });

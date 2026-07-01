@@ -65,25 +65,40 @@ const PLATFORM_LABELS = {
   TIKTOK: "TikTok",
 };
 
+// Industry benchmark thresholds — calibrated 2026-07-01 against published 2025/26
+// data (WordStream/LocaliQ Google Ads Benchmarks 2025–2026; WordStream/Triple
+// Whale/Lebesgue Meta Ads Benchmarks 2025). Anchors used:
+//   • Google SEARCH: avg CTR ~6.6%, avg CPC ~$5.4, avg CVR ~7.5%.
+//   • Meta: median CTR 2.19%, median CPM $13.48, median CVR 1.57% (lead ads ~7.7%).
+// CAUTION baked in: the Google figures are SEARCH-network averages, but Display
+// campaigns run structurally lower CTR (~0.4–0.6% is normal). So Google `good` is
+// set toward Search reality while `danger` is kept LOW — a low-CTR Display account
+// must not be branded "critically below benchmark" against a Search bar (the same
+// invalid-comparison class as the CPM-currency guard). CTR is a ratio (currency-
+// independent); CPM thresholds are USD (gated to USD accounts at the call site).
 export const INDUSTRY_BENCHMARKS = {
   ctr: {
     META: {
-      eCommerce:     { good: 1.5, warning: 0.8, danger: 0.4 },
-      "Lead Gen":    { good: 1.2, warning: 0.6, danger: 0.3 },
-      "App Install": { good: 1.8, warning: 1.0, danger: 0.5 },
-      Local:         { good: 1.0, warning: 0.5, danger: 0.25 },
-      "B2B SaaS":    { good: 0.8, warning: 0.4, danger: 0.2 },
-      Other:         { good: 1.0, warning: 0.5, danger: 0.25 },
+      // median all-industry CTR ~2.19%; fashion/home-decor ~2.8%, B2B lower ~1%.
+      eCommerce:     { good: 2.2, warning: 1.1, danger: 0.5 },
+      "Lead Gen":    { good: 1.6, warning: 0.8, danger: 0.4 },
+      "App Install": { good: 2.0, warning: 1.0, danger: 0.5 },
+      Local:         { good: 1.5, warning: 0.8, danger: 0.4 },
+      "B2B SaaS":    { good: 1.0, warning: 0.5, danger: 0.25 },
+      Other:         { good: 1.6, warning: 0.8, danger: 0.4 },
     },
     GOOGLE: {
-      eCommerce:     { good: 5.0, warning: 2.5, danger: 1.0 },
-      "Lead Gen":    { good: 4.5, warning: 2.0, danger: 0.8 },
-      "App Install": { good: 3.5, warning: 1.5, danger: 0.6 },
-      Local:         { good: 5.5, warning: 2.5, danger: 1.0 },
-      "B2B SaaS":    { good: 3.5, warning: 1.5, danger: 0.6 },
-      Other:         { good: 4.0, warning: 2.0, danger: 0.8 },
+      // Search avg ~6.6%; `good` toward Search reality, `danger` kept low so a
+      // low-CTR Display account isn't falsely flagged against a Search benchmark.
+      eCommerce:     { good: 6.0, warning: 2.0, danger: 0.5 },
+      "Lead Gen":    { good: 6.0, warning: 2.0, danger: 0.5 },
+      "App Install": { good: 4.5, warning: 1.5, danger: 0.4 },
+      Local:         { good: 7.0, warning: 2.5, danger: 0.6 },
+      "B2B SaaS":    { good: 5.0, warning: 1.8, danger: 0.4 },
+      Other:         { good: 6.0, warning: 2.0, danger: 0.5 },
     },
     TIKTOK: {
+      // TikTok CTR runs ~0.8–1.5%; less authoritative public data → conservative.
       eCommerce:     { good: 1.5, warning: 0.7, danger: 0.3 },
       "Lead Gen":    { good: 1.2, warning: 0.6, danger: 0.25 },
       "App Install": { good: 2.0, warning: 1.0, danger: 0.4 },
@@ -94,14 +109,16 @@ export const INDUSTRY_BENCHMARKS = {
   },
   cpm: {
     META: {
-      eCommerce:     { good: 15, warning: 28, danger: 45 },
-      "Lead Gen":    { good: 12, warning: 22, danger: 38 },
-      "App Install": { good: 10, warning: 20, danger: 35 },
-      Local:         { good: 8,  warning: 18, danger: 30 },
+      // median CPM ~$13.48 (2025, +20% YoY); B2B/retargeting carry premiums.
+      eCommerce:     { good: 14, warning: 26, danger: 42 },
+      "Lead Gen":    { good: 13, warning: 24, danger: 40 },
+      "App Install": { good: 11, warning: 20, danger: 34 },
+      Local:         { good: 10, warning: 20, danger: 32 },
       "B2B SaaS":    { good: 20, warning: 38, danger: 60 },
-      Other:         { good: 12, warning: 25, danger: 40 },
+      Other:         { good: 13, warning: 25, danger: 40 },
     },
     TIKTOK: {
+      // TikTok CPM runs below Meta; ~$6–12 typical.
       eCommerce:     { good: 8,  warning: 18, danger: 30 },
       "Lead Gen":    { good: 7,  warning: 15, danger: 25 },
       "App Install": { good: 6,  warning: 14, danger: 22 },
@@ -110,12 +127,85 @@ export const INDUSTRY_BENCHMARKS = {
       Other:         { good: 7,  warning: 15, danger: 25 },
     },
   },
+  // Conversion-rate benchmarks (%) — real 2025 medians. NOT yet wired to a firing
+  // rule (exposed via getBenchmark for the scorecard / future CVR verdicts); CVR
+  // is highly objective-dependent, so these are directional context, not a hard
+  // gate. Google = Search CVR (~7.5% avg); Meta = median 1.57%, lead ads ~7.7%.
+  cvr: {
+    GOOGLE: {
+      eCommerce:     { good: 3.5, warning: 2.0, danger: 1.0 },
+      "Lead Gen":    { good: 7.0, warning: 3.5, danger: 1.5 },
+      "App Install": { good: 4.0, warning: 2.0, danger: 1.0 },
+      Local:         { good: 6.0, warning: 3.0, danger: 1.2 },
+      "B2B SaaS":    { good: 4.0, warning: 2.0, danger: 1.0 },
+      Other:         { good: 5.0, warning: 2.5, danger: 1.2 },
+    },
+    META: {
+      eCommerce:     { good: 2.0, warning: 1.0, danger: 0.5 },
+      "Lead Gen":    { good: 5.0, warning: 2.5, danger: 1.0 },
+      "App Install": { good: 3.0, warning: 1.5, danger: 0.7 },
+      Local:         { good: 3.0, warning: 1.5, danger: 0.7 },
+      "B2B SaaS":    { good: 2.0, warning: 1.0, danger: 0.5 },
+      Other:         { good: 2.5, warning: 1.2, danger: 0.6 },
+    },
+    TIKTOK: {
+      eCommerce:     { good: 1.5, warning: 0.8, danger: 0.4 },
+      "Lead Gen":    { good: 3.0, warning: 1.5, danger: 0.7 },
+      "App Install": { good: 2.0, warning: 1.0, danger: 0.5 },
+      Local:         { good: 2.0, warning: 1.0, danger: 0.5 },
+      "B2B SaaS":    { good: 1.5, warning: 0.8, danger: 0.4 },
+      Other:         { good: 2.0, warning: 1.0, danger: 0.5 },
+    },
+  },
 };
 
-export const getBenchmark = (metric, platform, businessType) =>
-  INDUSTRY_BENCHMARKS[metric]?.[platform]?.[businessType] ||
-  INDUSTRY_BENCHMARKS[metric]?.[platform]?.Other ||
-  null;
+// Google NETWORK benchmarks — network dominates CTR/CVR/CPM far more than
+// business type (Search avg CTR ~6.6% vs Display ~0.5% — a ~13× gap; business-type
+// variation within a network is ~2×). The business-type GOOGLE table above is
+// calibrated to SEARCH; these bands cover the other networks so a Display / Video /
+// Shopping / PMax account is judged against its OWN network's norms, never a Search
+// bar. Published 2025/26 network averages (Google/WordStream/industry): Display CTR
+// ~0.5% & CVR ~0.7%; Shopping CTR ~0.85% & CVR ~1.9%; Video CTR ~0.5%; PMax blended
+// ~1–2% CTR / ~3% CVR. CPM is only meaningful for the impression-bought networks
+// (Display/Video). Bands: CTR/CVR descend (higher better); CPM ascends (lower better).
+export const GOOGLE_NETWORK_BENCHMARKS = {
+  SEARCH:     { ctr: { good: 6.0, warning: 2.0, danger: 0.5 },  cvr: { good: 7.0, warning: 3.0, danger: 1.2 } },
+  DISPLAY:    { ctr: { good: 0.6, warning: 0.35, danger: 0.15 }, cvr: { good: 0.7, warning: 0.35, danger: 0.15 }, cpm: { good: 4, warning: 9, danger: 16 } },
+  SHOPPING:   { ctr: { good: 0.9, warning: 0.5, danger: 0.25 }, cvr: { good: 1.9, warning: 1.0, danger: 0.4 } },
+  VIDEO:      { ctr: { good: 0.6, warning: 0.3, danger: 0.15 }, cvr: { good: 0.6, warning: 0.3, danger: 0.12 }, cpm: { good: 12, warning: 22, danger: 35 } },
+  PMAX:       { ctr: { good: 1.2, warning: 0.6, danger: 0.3 },  cvr: { good: 3.0, warning: 1.5, danger: 0.7 } },
+  DEMAND_GEN: { ctr: { good: 0.8, warning: 0.4, danger: 0.2 },  cvr: { good: 1.0, warning: 0.5, danger: 0.2 } },
+};
+
+// Google advertisingChannelType (GAQL enum) → our network-benchmark key.
+const GOOGLE_CHANNEL_MAP = {
+  SEARCH: "SEARCH",
+  DISPLAY: "DISPLAY",
+  SHOPPING: "SHOPPING",
+  VIDEO: "VIDEO",
+  PERFORMANCE_MAX: "PMAX",
+  DISCOVERY: "DEMAND_GEN",
+  DEMAND_GEN: "DEMAND_GEN",
+};
+
+/**
+ * Look up the good/warning/danger band for a metric. For Google, when the
+ * account's dominant NETWORK is known and is NOT Search, prefer the network band
+ * (Display/Video/Shopping/PMax) so a low-CTR Display account isn't judged against
+ * the Search bar. Search + unknown network fall through to the business-type table
+ * (which is Search-calibrated and keeps per-business-type nuance).
+ */
+export const getBenchmark = (metric, platform, businessType, network = null) => {
+  if (platform === "GOOGLE" && network && network !== "SEARCH") {
+    const netBand = GOOGLE_NETWORK_BENCHMARKS[network]?.[metric];
+    if (netBand) return netBand;
+  }
+  return (
+    INDUSTRY_BENCHMARKS[metric]?.[platform]?.[businessType] ||
+    INDUSTRY_BENCHMARKS[metric]?.[platform]?.Other ||
+    null
+  );
+};
 
 // Result/objective signal → business-model bucket. Only the unambiguous mappings
 // are inferred; lead/messaging both mean "Lead Gen" (a B2B SaaS account also runs
@@ -220,6 +310,47 @@ const getRecordsByLevel = (dataset, platform, level) => {
   return (platformData.records || []).filter(
     (record) => record.level === level
   );
+};
+
+// Name-based network fallback for when advertisingChannelType wasn't captured
+// (CSV uploads, older pulls). Ordered most-specific first.
+const googleNetworkFromName = (name) => {
+  const n = text(name);
+  if (!n) return null;
+  if (/p-?max|performance\s*max/.test(n)) return "PMAX";
+  if (/display|gdn/.test(n)) return "DISPLAY";
+  if (/shopping|\bpla\b|merchant/.test(n)) return "SHOPPING";
+  if (/video|youtube|\byt\b/.test(n)) return "VIDEO";
+  if (/discovery|demand\s*gen/.test(n)) return "DEMAND_GEN";
+  if (/search|brand|generic|keyword|\bkw\b/.test(n)) return "SEARCH";
+  return null;
+};
+
+/**
+ * The Google account's DOMINANT delivery network, weighted by spend — so CTR/CVR
+ * are benchmarked against the network the budget actually runs on. Reads each
+ * campaign's advertisingChannelType (normalized onto `objective`), falling back to
+ * a name heuristic. Returns "SEARCH" | "DISPLAY" | "SHOPPING" | "VIDEO" | "PMAX" |
+ * "DEMAND_GEN", or null when the network can't be determined (→ Search-calibrated
+ * business-type table is used).
+ */
+export const resolveGoogleNetwork = (dataset) => {
+  const camps = getRecordsByLevel(dataset, "GOOGLE", "campaign");
+  if (!camps.length) return null;
+  const spendByNet = {};
+  for (const c of camps) {
+    const spend = numberValue(c.spend);
+    if (spend <= 0) continue;
+    const net =
+      GOOGLE_CHANNEL_MAP[String(c.objective || c.channelType || "").toUpperCase()] ||
+      googleNetworkFromName(c.name);
+    if (!net) continue;
+    spendByNet[net] = (spendByNet[net] || 0) + spend;
+  }
+  const entries = Object.entries(spendByNet);
+  if (!entries.length) return null;
+  entries.sort((a, b) => b[1] - a[1]);
+  return entries[0][0];
 };
 
 const isPausedStatus = (status) => {
@@ -2214,8 +2345,16 @@ const addBenchmarkFindings = ({ audit, dataset, findings }) => {
 
     // CTR benchmark — all three platforms. Use the anomaly-excluded CTR so a
     // tracking anomaly's fake clicks don't make a struggling account read "Strong"
-    // against the industry bar (blended 6% vs genuine ~2.4%).
-    const ctrBenchmark = getBenchmark("ctr", platform, businessType);
+    // against the industry bar (blended 6% vs genuine ~2.4%). For Google, benchmark
+    // against the account's DOMINANT NETWORK (Search vs Display/Video/Shopping/PMax)
+    // so a low-CTR Display account isn't branded "critically below" a Search bar.
+    const googleNetwork = platform === "GOOGLE" ? resolveGoogleNetwork(dataset) : null;
+    const networkLabel = googleNetwork ? googleNetwork.replace("_", " ").toLowerCase() : null;
+    // Only non-Search networks get a disclosing suffix (the business-type table is
+    // already the Search benchmark, so "Search network" is redundant).
+    const netSuffix =
+      googleNetwork && googleNetwork !== "SEARCH" ? ` on the ${networkLabel} network` : "";
+    const ctrBenchmark = getBenchmark("ctr", platform, businessType, googleNetwork);
     const genMetrics = genuineAccountMetrics(dataset, platform);
     const ctrImpressions = genMetrics.hasAnomaly ? genMetrics.impressions : summary.impressions;
     const ctrClicks = genMetrics.hasAnomaly ? genMetrics.clicks : summary.clicks;
@@ -2241,17 +2380,24 @@ const addBenchmarkFindings = ({ audit, dataset, findings }) => {
             platform,
             severity: "HIGH",
             category: platform === "GOOGLE" ? "Quality Score & Relevance" : "Creative Performance",
-            title: `${PLATFORM_LABELS[platform]} CTR is critically below the ${businessType} industry benchmark`,
-            detail: `Your ${PLATFORM_LABELS[platform]} account CTR is ${actualCtr.toFixed(2)}% against an industry benchmark of ${ctrBenchmark.good}% for ${businessType}. A CTR this far below benchmark (danger threshold: ${ctrBenchmark.danger}%) indicates poor creative relevance, weak ad copy, or significant audience-creative mismatch. At your current spend of $${Math.round(summary.spend).toLocaleString()}, you are paying for impressions at an industry-trailing efficiency.`,
+            title: `${PLATFORM_LABELS[platform]} CTR is critically below the ${businessType}${netSuffix} benchmark`,
+            detail: `Your ${PLATFORM_LABELS[platform]} account CTR is ${actualCtr.toFixed(2)}% against a benchmark of ${ctrBenchmark.good}% for ${businessType}${netSuffix}. A CTR this far below benchmark (danger threshold: ${ctrBenchmark.danger}%) indicates poor creative relevance, weak ad copy, or significant audience-creative mismatch. At your current spend of $${Math.round(summary.spend).toLocaleString()}, you are paying for impressions at an industry-trailing efficiency.`,
             evidence: {
               actualCtr: +actualCtr.toFixed(2),
               benchmarkGood: ctrBenchmark.good,
               benchmarkDanger: ctrBenchmark.danger,
               businessType,
+              network: googleNetwork,
               impressions: summary.impressions,
+              // A CTR-vs-benchmark gap is a RELATIVE efficiency signal (a creative
+              // problem), not cuttable spend — it must never inject a recoverable
+              // dollar. Without this, the reconciler scraped the account spend
+              // quoted in the impact text and booked half of it as "recoverable"
+              // (a 2.79M-spend account hit the 50% cap on this finding alone).
+              advisory: true,
               ...ctrSignificance,
             },
-            estimatedImpact: `Closing the gap from ${actualCtr.toFixed(2)}% to the ${ctrBenchmark.good}% benchmark would deliver significantly more clicks at the same CPM — equivalent to free traffic on your current spend of $${Math.round(summary.spend).toLocaleString()}.`,
+            estimatedImpact: `Closing the gap from ${actualCtr.toFixed(2)}% to the ${ctrBenchmark.good}% benchmark would deliver more clicks at the same CPM — a lower effective CPC, not a cash refund.`,
             fixSteps: [
               `Test 3–5 new creative concepts with stronger hooks — the ${businessType} benchmark on ${PLATFORM_LABELS[platform]} is ${ctrBenchmark.good}% CTR.`,
               "Audit top-spending ads and pause anything with CTR below half the benchmark.",
@@ -2269,14 +2415,16 @@ const addBenchmarkFindings = ({ audit, dataset, findings }) => {
             platform,
             severity: "MEDIUM",
             category: platform === "GOOGLE" ? "Quality Score & Relevance" : "Creative Performance",
-            title: `${PLATFORM_LABELS[platform]} CTR is below the ${businessType} industry benchmark`,
-            detail: `Your ${PLATFORM_LABELS[platform]} account CTR is ${actualCtr.toFixed(2)}%. The industry benchmark for ${businessType} on ${PLATFORM_LABELS[platform]} is ${ctrBenchmark.good}%. You are in the warning zone (below ${ctrBenchmark.warning}%) — creative refresh and audience refinement will improve downstream CPA.`,
+            title: `${PLATFORM_LABELS[platform]} CTR is below the ${businessType}${netSuffix} benchmark`,
+            detail: `Your ${PLATFORM_LABELS[platform]} account CTR is ${actualCtr.toFixed(2)}%. The benchmark for ${businessType}${netSuffix ? netSuffix : ` on ${PLATFORM_LABELS[platform]}`} is ${ctrBenchmark.good}%. You are in the warning zone (below ${ctrBenchmark.warning}%) — creative refresh and audience refinement will improve downstream CPA.`,
             evidence: {
               actualCtr: +actualCtr.toFixed(2),
               benchmarkGood: ctrBenchmark.good,
               benchmarkWarning: ctrBenchmark.warning,
               businessType,
+              network: googleNetwork,
               impressions: summary.impressions,
+              advisory: true, // relative-efficiency signal, not recoverable spend
               ...ctrSignificance,
             },
             estimatedImpact: `Reaching the ${ctrBenchmark.good}% benchmark CTR would reduce your effective CPC without increasing spend.`,
@@ -2324,8 +2472,12 @@ const addBenchmarkFindings = ({ audit, dataset, findings }) => {
               totalSpend: Math.round(summary.spend),
               impressions: summary.impressions,
               estimatedOverspend: overVsGood,
+              // CPM overpayment is a reach-efficiency signal, not recoverable cash
+              // (lowering CPM extends reach at the same spend; it doesn't refund
+              // budget). Never let the overspend figure be booked as recoverable.
+              advisory: true,
             },
-            estimatedImpact: `Overpaying an estimated $${overVsGood.toLocaleString()} vs. benchmark CPM efficiency at your current impression volume.`,
+            estimatedImpact: `Overpaying an estimated $${overVsGood.toLocaleString()} vs. benchmark CPM efficiency at your current impression volume — lowering CPM extends reach at the same spend, it does not refund budget.`,
             fixSteps: [
               "Broaden targeting to access cheaper inventory — narrow audiences drive CPM spikes.",
               "Test interest-based and lookalike audiences alongside retargeting (retargeting pools carry premium CPMs).",
@@ -2348,6 +2500,7 @@ const addBenchmarkFindings = ({ audit, dataset, findings }) => {
               benchmarkGood: cpmBenchmark.good,
               benchmarkWarning: cpmBenchmark.warning,
               businessType,
+              advisory: true, // reach-efficiency signal, not recoverable spend
             },
             estimatedImpact: `Reducing CPM to the $${cpmBenchmark.good} benchmark would extend your reach significantly at the same spend.`,
             fixSteps: [
@@ -3153,10 +3306,18 @@ const buildDispersionFinding = ({ dataset, platform, level, ruleId, category, en
       minConversions: e.conversions > 0 ? 10 : 0,
       materialSpend: DISPERSION_MATERIAL,
     });
+    // Recoverable spend is FORWARD-LOOKING: you can only recover budget on a
+    // campaign that is still delivering. A paused entity's overspend already
+    // happened and cannot be optimised — booking it as "recoverable" is the
+    // confidently-wrong-number class (a paused 9×-baseline campaign was leading
+    // our headline with a number the client could never act on). Paused outliers
+    // stay in the breakdown as historical context, but contribute 0 recoverable.
     let recoverable = 0;
-    if (e.conversions === 0) recoverable = e.spend;
-    else if (cohortBase && e.cpa > cohortBase) recoverable = e.spend * (1 - cohortBase / e.cpa);
-    return { ...e, cohortBase, multiple, surface: gate.surface, confidence: gate.confidence, recoverable };
+    if (!isPausedStatus(e.status)) {
+      if (e.conversions === 0) recoverable = e.spend;
+      else if (cohortBase && e.cpa > cohortBase) recoverable = e.spend * (1 - cohortBase / e.cpa);
+    }
+    return { ...e, paused: isPausedStatus(e.status), cohortBase, multiple, surface: gate.surface, confidence: gate.confidence, recoverable };
   });
 
   // Outliers: ≥1.5× their OWN cohort baseline, or material spend at zero
@@ -3174,10 +3335,17 @@ const buildDispersionFinding = ({ dataset, platform, level, ruleId, category, en
   const fmt = (v) => formatMoney(v, currency);
 
   // Worst by rate (the leverage signal). Zero-conversion entities that burned
-  // material spend are treated as most severe (no finite multiple).
-  const worst = [...outliers].sort(
-    (a, b) => (b.multiple ?? Infinity) - (a.multiple ?? Infinity)
-  )[0];
+  // material spend are treated as most severe (no finite multiple). Prefer the
+  // worst CURRENTLY-DELIVERING outlier for the headline — the entity a reader can
+  // actually act on — and only fall back to an all-paused worst when nothing live
+  // is an outlier (a purely historical blow-up, framed as diagnostic below).
+  const byRate = (a, b) => (b.multiple ?? Infinity) - (a.multiple ?? Infinity);
+  const activeOutliers = outliers.filter((e) => !e.paused);
+  const pausedOutliers = outliers.filter((e) => e.paused);
+  const worst = [...(activeOutliers.length ? activeOutliers : outliers)].sort(byRate)[0];
+  // No live outlier ⇒ the finding is a historical diagnostic, not a recoverable
+  // money line (keeps paused waste out of the money map / headline total).
+  const diagnostic = activeOutliers.length === 0;
   // The baseline the worst entity is measured against is ITS cohort's baseline,
   // not a blended account number. Best performer to protect is the lowest-CPA
   // peer WITHIN the same cohort (comparing across conversion types is invalid).
@@ -3231,6 +3399,18 @@ const buildDispersionFinding = ({ dataset, platform, level, ruleId, category, en
       ? `${worst.name} is spending into the auction but producing no conversions at all. Material spend with zero results in a single ${entityNoun} almost always points to a concrete, fixable cause — a blocked or disapproved asset, a targeting/geo misconfiguration, or a broken conversion path — rather than a gradual efficiency drift.`
       : `${worst.name} converts at ${worst.multiple.toFixed(1)}× the cost of comparable ${cohortLabel(worst.cohort)} ${entityNoun}s, so each result there costs far more than it does on peers buying the same kind of result. The budget concentrated in it is the lever${multiCohort ? " — and it is judged only against like-for-like campaigns, not a blended average across different conversion types" : ""}.`;
 
+  // Recoverable framing only when a LIVE outlier exists. When every outlier is
+  // paused the spend is historical — say so plainly instead of implying money the
+  // client can recover this period.
+  const pausedTail = pausedOutliers.length
+    ? ` (${pausedOutliers.length} paused ${entityNoun}${pausedOutliers.length === 1 ? "" : "s"} also ran far above baseline historically — keep ${pausedOutliers.length === 1 ? "it" : "them"} off, not recoverable spend.)`
+    : "";
+  const impactText = diagnostic
+    ? worst.cpa != null
+      ? `${fmt(worst.spend)} was spent in ${worst.name} at ${worst.multiple.toFixed(1)}× the ${baseStr ? `${baseStr} ` : ""}${baseLabel} before it was paused — historical waste, not currently recoverable. Keep it off and protect ${best && best.name !== worst.name ? best.name : "the efficient campaigns"}.`
+      : `${worst.name} spent ${fmt(worst.spend)} at zero conversions before it was paused — historical, not currently recoverable.`
+    : `${fmt(totalRecoverable)} is recoverable by bringing ${activeOutliers.length === 1 ? `this ${entityNoun}` : `these ${activeOutliers.length} ${entityNoun}s`} toward the ${baseStr ? `${baseStr} ` : ""}${baseLabel} — without touching ${entityNoun}s already at or below it.${pausedTail}`;
+
   return createFinding({
     ruleId,
     platform,
@@ -3256,11 +3436,17 @@ const buildDispersionFinding = ({ dataset, platform, level, ruleId, category, en
       bestEntity: best?.name || null,
       bestCpa: best?.cpa != null ? Math.round(best.cpa * 100) / 100 : null,
       outlierCount: outliers.length,
+      activeOutlierCount: activeOutliers.length,
+      pausedOutlierCount: pausedOutliers.length,
+      // No live outlier ⇒ purely historical: keep it out of the money map and the
+      // recoverable headline total (it is shown as a diagnostic, not a dollar lever).
+      diagnostic,
+      worstPaused: worst.paused === true,
       entityBreakdown,
       confidence: worst.confidence,
       minSamplePassed: worst.confidence === "high",
     },
-    estimatedImpact: `${fmt(totalRecoverable)} is recoverable by bringing ${outliers.length === 1 ? `this ${entityNoun}` : `these ${outliers.length} ${entityNoun}s`} toward the ${baseStr ? `${baseStr} ` : ""}${baseLabel} — without touching ${entityNoun}s already at or below it.`,
+    estimatedImpact: impactText,
     fixSteps: [
       `Isolate ${worst.name} and diagnose its CPA driver — audience/targeting, landing page, or bidding — before changing account-wide settings.`,
       best && best.name !== worst.name
@@ -3668,7 +3854,18 @@ const addMetaHygieneFindings = ({ audit, dataset, findings }) => {
   // window (paused/archived before spend, or never activated). These come from a
   // separate structure-only bucket — the insights pull omits them — so they carry
   // zero metrics and never touched any baseline. Report them as clutter only.
-  const deadCampaigns = getRecordsByLevel(dataset, "META", "campaignStructureOnly");
+  //
+  // Guard: a structure-only shell can share its NAME with a campaign that actually
+  // spent this window (the same campaign represented in two buckets). Excluding
+  // those keeps the live campaign out of the "no delivery" list — otherwise the
+  // same campaign shows up as converting in the funnel AND as dead here (a direct
+  // contradiction a real Meta account exhibited).
+  const spendingNames = new Set(
+    campaigns.filter((c) => numberValue(c.spend) > 0).map((c) => text(c.name))
+  );
+  const deadCampaigns = getRecordsByLevel(dataset, "META", "campaignStructureOnly").filter(
+    (c) => !spendingNames.has(text(c.name))
+  );
   if (deadCampaigns.length && campaigns.length > 0) {
     const examples = deadCampaigns.slice(0, 5).map((c) => c.name);
     findings.push(
@@ -4459,6 +4656,99 @@ const addGoogleAudienceFindings = ({ audit, dataset, findings }) => {
       })
     );
   }
+};
+
+// Search-term-waste thresholds (query-level negative-keyword candidates). The #1
+// wasted-spend cause on Google per every audit checklist: queries the account
+// paid for that never convert. Ported into the LIVE engine (it previously only
+// ran in a shadow rule that never reached a report) and made currency-aware.
+const ST_MIN_SPEND_PER_TERM = 20; // a term must burn at least this to matter
+const ST_MIN_CLICKS_PER_TERM = 10; // …on enough clicks to trust the zero-conv signal
+const ST_MIN_TOTAL_SPEND = 500; // and the account must have material search-term spend
+const ST_SHARE_FIRE = 0.05; // fire at ≥5% of search-term spend wasted
+const ST_SHARE_HIGH = 0.1; // HIGH at ≥10%
+const ST_SHARE_CRITICAL = 0.2; // CRITICAL at ≥20%
+const ST_RECOVERY_FACTOR = 0.8; // realistically recoverable share of the waste
+
+/**
+ * GOOGLE-SEARCH-TERM-001 — the queries you paid for that never convert. Reads the
+ * search_term grain (search_term_view, already pulled by the normalizer): a term
+ * with material spend and enough clicks but ZERO conversions is a negative-keyword
+ * candidate. This is consistently the single highest-ROI Google finding, yet the
+ * live engine never analysed the grain. Its wasted spend is a query-level slice of
+ * campaign spend, so recoverable.js pools it into the campaign inefficiency
+ * (counted once via max), never stacked on the campaign figure.
+ */
+const addGoogleSearchTermFindings = ({ audit, dataset, findings }) => {
+  if (!audit.selectedPlatforms.includes("GOOGLE")) return;
+  const terms = getRecordsByLevel(dataset, "GOOGLE", "search_term");
+  if (!terms || terms.length === 0) return;
+  const currency = getReportCurrency(dataset, "GOOGLE");
+  const fmt = (v) => formatMoney(v, currency);
+
+  let totalSpend = 0;
+  const wasted = [];
+  const byCampaign = new Map();
+  for (const t of terms) {
+    const spend = numberValue(t.spend);
+    const clicks = numberValue(t.clicks);
+    const conv = numberValue(t.conversions ?? t.results);
+    totalSpend += spend;
+    if (spend >= ST_MIN_SPEND_PER_TERM && clicks >= ST_MIN_CLICKS_PER_TERM && conv === 0) {
+      const name = t.searchTerm || t.name || t.query || "(unknown query)";
+      wasted.push({ name, spend, clicks, campaign: t.campaignName || null });
+      if (t.campaignName) byCampaign.set(t.campaignName, (byCampaign.get(t.campaignName) || 0) + spend);
+    }
+  }
+  if (totalSpend < ST_MIN_TOTAL_SPEND || wasted.length === 0) return;
+
+  const wastedSpend = wasted.reduce((s, w) => s + w.spend, 0);
+  const share = wastedSpend / totalSpend;
+  const severity =
+    share >= ST_SHARE_CRITICAL ? "CRITICAL" : share >= ST_SHARE_HIGH ? "HIGH" : share >= ST_SHARE_FIRE ? "MEDIUM" : null;
+  if (!severity) return;
+
+  const recoverable = wastedSpend * ST_RECOVERY_FACTOR;
+  const examples = [...wasted].sort((a, b) => b.spend - a.spend).slice(0, 5).map((w) => ({
+    term: w.name,
+    spend: Math.round(w.spend),
+    clicks: w.clicks,
+    campaign: w.campaign,
+  }));
+  // The campaign carrying the most query waste — lets the reconciler pool this
+  // into that campaign's inefficiency instead of stacking a second copy.
+  const worstCampaign =
+    [...byCampaign.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+  findings.push(
+    createFinding({
+      ruleId: "GOOGLE-SEARCH-TERM-001",
+      platform: "GOOGLE",
+      severity,
+      category: "Keyword Strategy",
+      title: `${fmt(wastedSpend)} of search-term spend converted nothing — ${wasted.length} negative-keyword candidate${wasted.length === 1 ? "" : "s"}`,
+      detail: `${wasted.length} search term${wasted.length === 1 ? "" : "s"} consumed ${fmt(wastedSpend)} (${Math.round(share * 100)}% of search-term spend) on ${wasted.reduce((s, w) => s + w.clicks, 0)} clicks without a single conversion. These are the queries the account is paying for that never pay back — the classic negative-keyword list.`,
+      rootCause: `Broad/phrase match (or no negative-keyword maintenance) is letting budget flow to queries that don't convert. Each is a concrete negative-keyword candidate, not a bidding or landing-page problem.`,
+      evidence: {
+        wastedSpend: Math.round(wastedSpend),
+        wastedTermCount: wasted.length,
+        wastedSharePercent: Number((share * 100).toFixed(1)),
+        totalSearchTermSpend: Math.round(totalSpend),
+        examples,
+        campaign: worstCampaign,
+        currency: currency || "USD",
+        confidence: "high",
+        minSamplePassed: true,
+      },
+      estimatedImpact: `About ${fmt(recoverable)} is recoverable by adding these zero-conversion queries as negative keywords, so the budget shifts to terms that convert.`,
+      fixSteps: [
+        "Open Google Ads → Keywords → Search terms, sort by cost, and filter to zero conversions.",
+        `Add the ${wasted.length} zero-conversion term${wasted.length === 1 ? "" : "s"} above as negative keywords at the campaign or ad-group level.`,
+        "Cluster recurring junk patterns into a shared negative-keyword list for reuse across campaigns.",
+        "Re-audit in ~14 days to confirm the recovered budget moved to converting queries.",
+      ],
+    })
+  );
 };
 
 // Audience-fragmentation thresholds.
@@ -5305,6 +5595,116 @@ const CORE_EXTENSION_TYPES = ["SITELINK", "CALLOUT", "STRUCTURED_SNIPPET"];
  * CTR at no extra CPC; their absence is a classic, easy audit win. Stays silent
  * when no asset config was pulled (can't distinguish empty from fetch failure).
  */
+// Budget-allocation thresholds.
+const ALLOC_MIN_CONVERSIONS = 20; // a paused campaign needs this many to count as "proven"
+const ALLOC_BETTER_RATIO = 0.6; // a paused winner at ≤60% of the live CPA is materially better
+
+/**
+ * GOOGLE-ALLOC-001 — the account is live on a weak campaign while proven winners
+ * sit paused. This is the most actionable structural call there is: when the only
+ * (or dominant) currently-delivering campaign converts far worse than a paused
+ * campaign that already proved a strong CPA on real volume, the single fastest CPA
+ * win is to re-enable the winner and cut/redirect the loser — no new creative or
+ * audience work needed. Reads campaign status + CPA + conversions.
+ */
+const addGoogleAllocationFindings = ({ audit, dataset, findings }) => {
+  if (!audit.selectedPlatforms.includes("GOOGLE")) return;
+  const campaigns = getRecordsByLevel(dataset, "GOOGLE", "campaign");
+  if (campaigns.length === 0) return;
+  const currency = getReportCurrency(dataset, "GOOGLE");
+  const fmt = (v) => formatMoney(v, currency);
+
+  const cpaOf = (c) => {
+    const conv = numberValue(c.results ?? c.conversions);
+    const spend = numberValue(c.spend);
+    return conv > 0 ? (c.cpa != null ? numberValue(c.cpa) : spend / conv) : null;
+  };
+
+  // Currently-delivering campaigns that actually spent.
+  const active = campaigns.filter((c) => !isPausedStatus(c.status) && numberValue(c.spend) > 0);
+  if (active.length === 0) return;
+  // The live set's conversion-weighted CPA.
+  const activeSpend = active.reduce((s, c) => s + numberValue(c.spend), 0);
+  const activeConv = active.reduce((s, c) => s + numberValue(c.results ?? c.conversions), 0);
+  const activeCpa = activeConv > 0 ? activeSpend / activeConv : null;
+  if (activeCpa == null) return;
+
+  // Paused campaigns that PROVED a strong CPA on real volume.
+  const provenPaused = campaigns
+    .filter(
+      (c) =>
+        isPausedStatus(c.status) &&
+        numberValue(c.results ?? c.conversions) >= ALLOC_MIN_CONVERSIONS &&
+        cpaOf(c) != null
+    )
+    .map((c) => ({ name: c.name, cpa: cpaOf(c), conv: numberValue(c.results ?? c.conversions) }))
+    .sort((a, b) => a.cpa - b.cpa);
+  if (provenPaused.length === 0) return;
+
+  const winner = provenPaused[0];
+  // Only fire when the paused winner is MATERIALLY better than the live set.
+  if (!(winner.cpa <= activeCpa * ALLOC_BETTER_RATIO)) return;
+
+  // Reallocation savings: the live budget is buying results at activeCpa; the
+  // proven winner buys them at winner.cpa. Recovering the gap on the live spend
+  // is the lever. This is the SAME live-campaign pool the dispersion finding
+  // (CAMP-CPA) already measures, so it is campaign-scoped and reconciled (counted
+  // once, never stacked) via recoverable.js — the carrier with the larger figure
+  // wins the pool and the other nets to 0.
+  const recoverable = activeSpend * (1 - winner.cpa / activeCpa);
+  // The live campaign that owns this spend pool (highest-spend live campaign),
+  // so the reconciler can group ALLOC with the dispersion finding on it.
+  const liveRep = [...active].sort((a, b) => numberValue(b.spend) - numberValue(a.spend))[0];
+
+  const liveLabel =
+    active.length === 1
+      ? `"${active[0].name}" (${fmt(active[0].cpa != null ? active[0].cpa : activeCpa)} CPA)`
+      : `your ${active.length} live campaigns (${fmt(activeCpa)} blended CPA)`;
+  const otherWinners = provenPaused
+    .slice(1, 3)
+    .filter((w) => w.cpa <= activeCpa * ALLOC_BETTER_RATIO);
+  const winnerList = [winner, ...otherWinners]
+    .map((w) => `"${w.name}" (${fmt(w.cpa)} CPA, ${Math.round(w.conv)} conversions)`)
+    .join("; ");
+
+  findings.push(
+    createFinding({
+      ruleId: "GOOGLE-ALLOC-001",
+      platform: "GOOGLE",
+      severity: "CRITICAL",
+      category: "Bidding Strategy Alignment",
+      title: `The account is live on a weaker campaign while a proven winner sits paused`,
+      detail: `Right now ${liveLabel} is the spending campaign, but ${winnerList} ${otherWinners.length ? "are" : "is"} PAUSED despite a far better, already-proven cost per result. The account is delivering on its weaker performer while the campaign that converts efficiently is idle — so spend is buying expensive results it doesn't have to.`,
+      rootCause: "Winners were paused and a weaker campaign left running — a campaign-management gap, not a bidding or audience problem. The efficient campaign already exists; it just isn't on.",
+      evidence: {
+        liveCampaign: active.length === 1 ? active[0].name : null,
+        // The campaign that owns the spend pool — lets the reconciler group ALLOC
+        // with the dispersion finding on the same live campaign (counted once).
+        campaign: liveRep?.name || null,
+        liveCpa: Math.round(activeCpa * 100) / 100,
+        liveCount: active.length,
+        pausedWinner: winner.name,
+        pausedWinnerCpa: Math.round(winner.cpa * 100) / 100,
+        pausedWinnerConversions: Math.round(winner.conv),
+        reallocationRecoverable: Math.round(recoverable),
+        // The reallocation is the fastest CPA win in the account — it must lead
+        // its severity band even against a dispersion finding carrying a bigger
+        // raw (often paused, non-recoverable) dollar figure.
+        leadsSeverityBand: true,
+        confidence: "high",
+      },
+      estimatedImpact: `About ${fmt(recoverable)} is recoverable by re-enabling ${winner.name} (${fmt(winner.cpa)} CPA) in place of the weaker live ${active.length === 1 ? `"${active[0].name}"` : "campaigns"} (${fmt(activeCpa)} CPA) — the single fastest cost-per-result win in the account, needing no new creative or audience work, just turning the proven campaign back on.`,
+      fixSteps: [
+        `Re-enable "${winner.name}" today — it already converts at ${fmt(winner.cpa)} on ${Math.round(winner.conv)} conversions.`,
+        active.length === 1
+          ? `Cut or pause the live "${active[0].name}" (${fmt(active[0].cpa != null ? active[0].cpa : activeCpa)} CPA); if keeping it for data, drop its budget sharply.`
+          : `Redirect budget from the weaker live campaigns toward the re-enabled winner.`,
+        "Confirm the re-enabled campaign keeps its prior targeting/bid settings so it resumes at its proven efficiency.",
+      ],
+    })
+  );
+};
+
 /**
  * GOOGLE-HYGIENE-001 — dead campaigns clutter. Unlike Meta insights (which omit
  * zero-delivery campaigns), the Google pull keeps every campaign in byLevel, so
@@ -5613,6 +6013,7 @@ export const runDeterministicAudit = (audit) => {
   addGoogleBiddingFindings({ audit, dataset, findings });
   addGoogleBidTargetFindings({ audit, dataset, findings });
   addGoogleAudienceFindings({ audit, dataset, findings });
+  addGoogleSearchTermFindings({ audit, dataset, findings });
   addGoogleAudienceFragmentationFindings({ audit, dataset, findings });
   addGoogleDeviceFindings({ audit, dataset, findings });
   addGoogleLandingPageFindings({ audit, dataset, findings });
@@ -5621,6 +6022,7 @@ export const runDeterministicAudit = (audit) => {
   addGoogleImpressionShareFindings({ audit, dataset, findings });
   addGoogleConversionTrackingFindings({ audit, dataset, findings });
   addGoogleAdStrengthFindings({ audit, dataset, findings });
+  addGoogleAllocationFindings({ audit, dataset, findings });
   addGoogleHygieneFindings({ audit, dataset, findings });
   addGoogleExtensionFindings({ audit, dataset, findings });
   addCompoundFindings({ audit, findings });
