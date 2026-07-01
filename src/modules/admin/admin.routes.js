@@ -7,6 +7,7 @@ import {
   listUsers,
   updateUserStatus,
   deleteUser,
+  purgeUser,
   listOrganizations,
   impersonateUser,
   stopImpersonation,
@@ -47,6 +48,15 @@ router.delete(
   requireAuth,
   requireInternalRole("SUPER_ADMIN"),
   asyncHandler(deleteUser)
+);
+
+// Hard delete — permanently purges the user and all owned data (data-deletion
+// requests). Irreversible; separate from the soft-delete above.
+router.delete(
+  "/users/:userId/purge",
+  requireAuth,
+  requireInternalRole("SUPER_ADMIN"),
+  asyncHandler(purgeUser)
 );
 
 router.get(

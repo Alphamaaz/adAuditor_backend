@@ -6,6 +6,7 @@ import {
   serializeAdminStats,
 } from "./admin.presenter.js";
 import { createSessionToken, hashSessionToken } from "../../utils/sessionToken.js";
+import { purgeUserAndOwnedData } from "../auth/accountDeletion.service.js";
 import { 
   SESSION_COOKIE_NAME, 
   ADMIN_IMPERSONATION_COOKIE_NAME,
@@ -174,6 +175,35 @@ export const deleteUser = async (req, res) => {
     status: "success",
     message: "User account soft-deleted. Existing sessions have been revoked.",
     data: serializeAdminUser(updatedUser),
+  });
+};
+
+/**
+ * HARD delete — permanently purges a user and all data they own, to honor a
+ * data-deletion request. Irreversible. Distinct from deleteUser (soft-delete).
+ */
+export const purgeUser = async (req, res) => {
+  const { userId } = req.params;
+
+  if (userId === req.user.id) {
+    throw badRequest("You cannot delete your own admin account");
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) throw notFound("User not found");
+
+  if (user.internalRole === "SUPER_ADMIN") {
+    throw badRequest("Cannot delete a Super Admin");
+  }
+
+  const result = await purgeUserAndOwnedData(userId);
+
+  res.json({
+    status: "success",
+    message:
+      `User and all owned data permanently deleted ` +
+      `(${result.deletedOrganizations} organization(s), ${result.deletedConnections} platform connection(s) removed).`,
+    data: { userId, ...result },
   });
 };
 
