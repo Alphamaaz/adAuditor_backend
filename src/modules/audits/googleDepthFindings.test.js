@@ -36,11 +36,12 @@ const googleAudit = (byLevelExtra, googleSummary = { spend: 50000, conversions: 
 });
 
 describe("GOOGLE-DEVICE-001 — in-campaign device waste", () => {
-  it("flags a desktop device burning spend at zero conversions", () => {
+  it("flags a desktop device burning significant spend at zero conversions", () => {
     const audit = googleAudit({
       campaign_device: [
         { level: "campaign_device", campaignName: "Display | IND | Signals", device: "MOBILE", spend: 17000, clicks: 6500, conversions: 209 },
-        { level: "campaign_device", campaignName: "Display | IND | Signals", device: "DESKTOP", spend: 173, clicks: 47, conversions: 0 },
+        // Campaign CPA ≈ 93: PKR 2,400 should have bought ~26 conversions.
+        { level: "campaign_device", campaignName: "Display | IND | Signals", device: "DESKTOP", spend: 2400, clicks: 950, conversions: 0 },
       ],
     });
     const { findings } = runDeterministicAudit(audit);
@@ -50,6 +51,24 @@ describe("GOOGLE-DEVICE-001 — in-campaign device waste", () => {
     expect(dev.evidence.reason).toBe("zero_conversions");
     expect(dev.evidence.campaign).toContain("IND");
     expect(dev.estimatedImpact).toContain("-100%");
+    // Severity is proportional to account share: 2,400 of 50,000 (4.8%) is a
+    // MEDIUM cleanup item, not a headline HIGH.
+    expect(dev.severity).toBe("MEDIUM");
+    expect(dev.evidence.spendSharePercent).toBeCloseTo(4.8, 0);
+  });
+
+  it("omits a tiny-sample device slice instead of branding it a finding", () => {
+    // PKR 173 (0.3% of account) on 47 clicks could only have bought ~2 expected
+    // conversions — observing zero is not statistically meaningful, and the old
+    // fixed thresholds (built for USD) branded it a confident finding anyway.
+    const audit = googleAudit({
+      campaign_device: [
+        { level: "campaign_device", campaignName: "Display | IND | Signals", device: "MOBILE", spend: 17000, clicks: 6500, conversions: 209 },
+        { level: "campaign_device", campaignName: "Display | IND | Signals", device: "DESKTOP", spend: 173, clicks: 47, conversions: 0 },
+      ],
+    });
+    const { findings } = runDeterministicAudit(audit);
+    expect(findings.find((f) => f.ruleId === "GOOGLE-DEVICE-001")).toBeUndefined();
   });
 });
 

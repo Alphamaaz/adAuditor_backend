@@ -53,8 +53,8 @@ describe("per-campaign deep-dive section", () => {
   });
 
   it("assigns the right verdict to each campaign vs the PKR 68 baseline", () => {
-    // Columns: Campaign | Spend | Results | Cost/result | Status | Verdict.
-    const byName = Object.fromEntries(section.blocks[0].rows.map((r) => [r[0], r[5]]));
+    // Columns: Campaign | Bidding | Spend | Results | Cost/result | Status | Verdict.
+    const byName = Object.fromEntries(section.blocks[0].rows.map((r) => [r[0], r[6]]));
     // New Engagement: PKR 44 cost/result, below baseline → protect & scale.
     expect(byName["New Engagement Campaign"]).toMatch(/protect and scale/i);
     // Pesh: PKR 133, ~2× baseline → above average, tighten.
@@ -64,7 +64,7 @@ describe("per-campaign deep-dive section", () => {
   });
 
   it("gives each campaign an at-a-glance status pill", () => {
-    const statusByName = Object.fromEntries(section.blocks[0].rows.map((r) => [r[0], r[4]]));
+    const statusByName = Object.fromEntries(section.blocks[0].rows.map((r) => [r[0], r[5]]));
     // New Engagement at/below baseline → good; Kingdom zero-conv → bad.
     expect(statusByName["New Engagement Campaign"].status).toBe("good");
     expect(statusByName["Kingdom Testing"].status).toBe("bad");

@@ -573,6 +573,16 @@ const formatMoney = (value, currency) => {
   return currency && currency !== "USD" ? `${currency} ${formatted}` : `$${formatted}`;
 };
 
+// Google reports fractional conversions (data-driven attribution) — "79.999996
+// conversions" in client prose is a formatting bug, not precision. Whole-ish
+// values print as integers; genuinely fractional ones keep one decimal.
+const formatConversions = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  const rounded = Math.round(n);
+  return Math.abs(n - rounded) < 0.05 ? rounded.toLocaleString("en-US") : n.toFixed(1);
+};
+
 // Format a monetary value using the user's declared intake currency (budget,
 // CPA etc.) — distinct from the ad-account reporting currency used by
 // formatMoney/localizeMoney above.
@@ -2918,6 +2928,16 @@ const addSegmentFindings = ({ audit, dataset, findings }) => {
     const baseCpa = trustedAccountBaseline(dataset, platform);
 
     // Worst significant segment per dimension, then take the top N by waste.
+    // The floor is self-normalizing (not a fixed currency amount): waste must be
+    // worth at least ~2 conversions at the account's own cost per result AND
+    // ~0.5% of platform spend before it earns a finding — "50" alone means
+    // dollars in one account and pennies in another.
+    const platformSpend = summary.spend || 0;
+    const wasteFloor = Math.max(
+      SEGMENT_WASTE_MIN,
+      (baseCpa || 0) * 2,
+      platformSpend * 0.005
+    );
     const perDimensionWorst = [];
     for (const [dimension, records] of Object.entries(byDimension)) {
       if (!Array.isArray(records) || records.length === 0) continue;
@@ -2925,23 +2945,22 @@ const addSegmentFindings = ({ audit, dataset, findings }) => {
         dimension,
         records,
         baselineCpa: baseCpa,
-        minSpend: SEGMENT_WASTE_MIN,
+        minSpend: Math.max(SEGMENT_WASTE_MIN, baseCpa || 0),
       });
       const candidate = analysis.worst;
-      if (candidate && candidate.wastedSpend >= SEGMENT_WASTE_MIN) {
+      if (candidate && candidate.wastedSpend >= wasteFloor) {
         perDimensionWorst.push(candidate);
       }
     }
     if (perDimensionWorst.length === 0) continue;
 
     perDimensionWorst.sort((a, b) => b.wastedSpend - a.wastedSpend);
-    const platformSpend = summary.spend || 0;
     const currency = getReportCurrency(dataset, platform);
 
     for (const worst of perDimensionWorst.slice(0, SEGMENT_MAX_FINDINGS_PER_PLATFORM)) {
       const wasteShare = platformSpend > 0 ? worst.wastedSpend / platformSpend : 0;
       const severity =
-        wasteShare >= 0.3 ? "CRITICAL" : wasteShare >= 0.1 ? "HIGH" : "MEDIUM";
+        wasteShare >= 0.3 ? "CRITICAL" : wasteShare >= 0.1 ? "HIGH" : wasteShare >= 0.03 ? "MEDIUM" : "LOW";
 
       const wasteStr = formatMoney(worst.wastedSpend, currency);
       const spendStr = formatMoney(worst.spend, currency);
@@ -2961,7 +2980,7 @@ const addSegmentFindings = ({ audit, dataset, findings }) => {
       const sharePct = Math.round(segmentSpendShare * 100);
 
       const confirmStep = dominantConverting
-        ? `Shift budget away from ${worst.segment} toward your higher-converting segments — it still produces ${worst.conversions} conversions, so do NOT exclude it outright. Start with a 15–25% reallocation and re-measure.`
+        ? `Shift budget away from ${worst.segment} toward your higher-converting segments — it still produces ${formatConversions(worst.conversions)} conversions, so do not exclude it outright. Start with a 15–25% reallocation and re-measure.`
         : worst.dimension === "day_of_week" || worst.dimension === "weekday"
           ? "Validate the day-of-week pattern on a longer lookback before applying a permanent schedule exclusion; start with a conservative bid adjustment."
           : `Exclude or down-bid the ${worst.segment} segment after confirming the trend on the next full reporting cycle.`;
@@ -2978,7 +2997,7 @@ const addSegmentFindings = ({ audit, dataset, findings }) => {
           detail:
             worst.reason === "zero_conversions"
               ? `The ${worst.segment} ${worst.dimension} segment spent ${spendStr} with zero conversions, against an account baseline cost per result of ${baseStr}.`
-              : `The ${worst.segment} ${worst.dimension} segment has a ${cpaStr} cost per result (CPA) vs the account's ${baseStr} baseline — ${wasteStr} of its spend is the excess above what that result would cost at the baseline rate.`,
+              : `The ${worst.segment} ${worst.dimension} segment spent ${spendStr} for ${formatConversions(worst.conversions)} conversion${Math.round(worst.conversions) === 1 ? "" : "s"} — a ${cpaStr} cost per result vs the account's ${baseStr} baseline. At the baseline rate those conversions would have cost ${formatMoney(Math.max(0, worst.spend - worst.wastedSpend), currency)}; the ${wasteStr} difference is the measured waste.`,
           rootCause,
           evidence: {
             dimension: worst.dimension,
@@ -3002,7 +3021,7 @@ const addSegmentFindings = ({ audit, dataset, findings }) => {
           // the CPA ("converts at PKR 112") would mis-read the finding's value as
           // the CPA in the money map + projection.
           estimatedImpact: dominantConverting
-            ? `About ${wasteStr} of efficiency upside: ${worst.segment} carries ${sharePct}% of spend and converts at ${cpaStr} vs the ${baseStr} baseline. It still drives ${worst.conversions} conversions, so rebalance budget toward your more efficient segments — don't cut it.`
+            ? `About ${wasteStr} of efficiency upside: ${worst.segment} carries ${sharePct}% of spend and converts at ${cpaStr} vs the ${baseStr} baseline. It still drives ${formatConversions(worst.conversions)} conversions, so rebalance budget toward your more efficient segments — don't cut it.`
             : `${wasteStr} in this segment is recoverable by reducing or excluding it. Reallocate to segments performing at or below the ${baseStr} baseline CPA.`,
           fixSteps: [
             `Review the ${worst.segment} ${worst.dimension} segment in the platform UI to confirm the underperformance.`,
@@ -3685,7 +3704,7 @@ const addMetaGeoFindings = ({ audit, dataset, findings }) => {
         : "";
     const convClause = leak.zeroConv
       ? "and returned zero conversions"
-      : `at ${leak.conversions} conversion(s)`;
+      : `at ${formatConversions(leak.conversions)} conversion(s)`;
 
     findings.push(
       createFinding({
@@ -3708,7 +3727,7 @@ const addMetaGeoFindings = ({ audit, dataset, findings }) => {
           cpmMultipleOfHome: leak.cpmMultiple != null ? Math.round(leak.cpmMultiple * 10) / 10 : null,
           confidence: "high",
         },
-        estimatedImpact: `${fmt(leak.spend)} delivered to ${leak.country} returned ${leak.conversions} conversions — recoverable by correcting the campaign's location targeting to ${home.country}.`,
+        estimatedImpact: `${fmt(leak.spend)} delivered to ${leak.country} returned ${formatConversions(leak.conversions)} conversions — recoverable by correcting the campaign's location targeting to ${home.country}.`,
         fixSteps: [
           `Open the ad set's Locations setting and confirm it is set to ${home.country} (or the intended market) — ${leak.country} delivery is almost certainly unintended.`,
           `If ${leak.country} targeting was deliberate, raise that campaign's budget to a level that can compete in the ${leak.country} auction and set a market-appropriate cost target; the current budget cannot.`,
@@ -3868,23 +3887,47 @@ const addMetaHygieneFindings = ({ audit, dataset, findings }) => {
   );
   if (deadCampaigns.length && campaigns.length > 0) {
     const examples = deadCampaigns.slice(0, 5).map((c) => c.name);
+    // Ghost-budget pool: each dead campaign keeps its configured daily budget
+    // (Meta stores budgets in minor currency units). A paused shell doesn't
+    // spend, but one accidental toggle starts delivery at its FULL set budget —
+    // the dormant total is the size of that misclick risk.
+    const dormantDailyBudget = deadCampaigns.reduce(
+      (sum, c) => sum + numberValue(c.budget) / 100,
+      0
+    );
+    const currency = getReportCurrency(dataset, "META");
+    const ghostNote =
+      dormantDailyBudget > 0
+        ? ` Their configured budgets still total about ${formatMoney(dormantDailyBudget, currency)}/day of dormant spend authority — a single accidental re-activation starts spending at its full set budget immediately.`
+        : "";
     findings.push(
       createFinding({
         ruleId: "META-HYGIENE-002",
         platform: "META",
-        severity: "LOW",
+        severity: dormantDailyBudget > 0 ? "MEDIUM" : "LOW",
         category: "Campaign Structure",
         title: `${deadCampaigns.length} campaign${deadCampaigns.length === 1 ? "" : "s"} had no delivery in this window`,
-        detail: `${deadCampaigns.length} campaign${deadCampaigns.length === 1 ? " exists" : "s exist"} in the account but spent nothing and served no impressions in the audited window (e.g. ${examples.map((n) => `"${n}"`).join(", ")}). They were paused, archived, or never activated. They add no performance data and make the live structure harder to read.`,
+        detail: `${deadCampaigns.length} campaign${deadCampaigns.length === 1 ? " exists" : "s exist"} in the account but spent nothing and served no impressions in the audited window (e.g. ${examples.map((n) => `"${n}"`).join(", ")}). They were paused, archived, or never activated. They add no performance data and make the live structure harder to read.${ghostNote}`,
         rootCause: "Campaigns built and then paused (or never launched) before delivery accumulate as zero-spend shells. The insights report hides them, so they quietly pile up until the account list is cluttered with inactive entries.",
         evidence: {
           deadCampaignCount: deadCampaigns.length,
           examples,
+          ...(dormantDailyBudget > 0
+            ? { dormantDailyBudget: Math.round(dormantDailyBudget) }
+            : {}),
           spend: 0,
           impressions: 0,
           confidence: "high",
+          // The dormant-budget figure is a RISK amount (what a misclick could
+          // start spending), not recoverable waste — without this flag the
+          // money scraper reads "PKR 49,800/day" out of the narrative and
+          // promotes it to the report's recoverable headline + projection.
+          advisory: true,
         },
-        estimatedImpact: "No spend impact — this is structural hygiene. Archiving or deleting them makes the account easier to read, audit, and report on.",
+        estimatedImpact:
+          dormantDailyBudget > 0
+            ? `No current spend impact, but about ${formatMoney(dormantDailyBudget, currency)}/day of dormant budget sits one misclick from reactivating. Archiving removes the risk and cleans the account.`
+            : "No spend impact — this is structural hygiene. Archiving or deleting them makes the account easier to read, audit, and report on.",
         fixSteps: [
           "Review the zero-delivery campaigns and delete or formally archive the ones you don't intend to relaunch.",
           "Keep only live or intentionally-paused campaigns in the active account view so the structure stays legible.",
@@ -4287,7 +4330,7 @@ const addGoogleBiddingFindings = ({ audit, dataset, findings }) => {
         severity,
         category: "Bidding Strategy Alignment",
         title: `${c.name} runs Maximize Conversions with no CPA cap — ${overPct}% over ${targetCpa > 0 ? "target" : "baseline"}`,
-        detail: `${c.name} is on MAXIMIZE_CONVERSIONS with no target CPA, so Google spends the full budget with no efficiency constraint. It has ${c.conversions} conversions over the window — enough signal for a target-CPA bid — yet runs at ${fmt(c.cpa)} CPA, ${overPct}% above ${refLabel}. Adding a target CPA forces the algorithm into efficiency mode and typically cuts CPA 15–25%.`,
+        detail: `${c.name} is on MAXIMIZE_CONVERSIONS with no target CPA, so Google spends the full budget with no efficiency constraint. It has ${formatConversions(c.conversions)} conversions over the window — enough signal for a target-CPA bid — yet runs at ${fmt(c.cpa)} CPA, ${overPct}% above ${refLabel}. Adding a target CPA forces the algorithm into efficiency mode and typically cuts CPA 15–25%.`,
         evidence: {
           campaign: c.name,
           biddingStrategy: c.strategy,
@@ -4329,6 +4372,10 @@ const addGoogleBidTargetFindings = ({ audit, dataset, findings }) => {
 
   const currency = getReportCurrency(dataset, "GOOGLE");
   const fmt = (v) => formatMoney(v, currency);
+  // Click costs are often < 1 currency unit — the integer money formatter would
+  // print "PKR 3" for PKR 2.52, breaking the CVR arithmetic shown to the client.
+  const fmt2 = (v) =>
+    currency && currency !== "USD" ? `${currency} ${Number(v).toFixed(2)}` : `$${Number(v).toFixed(2)}`;
 
   const candidates = [];
   for (const c of campaigns) {
@@ -4346,6 +4393,8 @@ const addGoogleBidTargetFindings = ({ audit, dataset, findings }) => {
           kind: "tcpa",
           name: c.name || "(unnamed campaign)",
           spend,
+          clicks: numberValue(c.clicks),
+          conversions,
           target: targetCpa,
           actual: actualCpa,
           ratio: actualCpa / targetCpa,
@@ -4377,6 +4426,36 @@ const addGoogleBidTargetFindings = ({ audit, dataset, findings }) => {
 
   if (w.kind === "tcpa") {
     const overPct = Math.round((w.ratio - 1) * 100);
+    // The CVR arithmetic discriminates between "bad target" and "the audience
+    // can't support ANY reasonable target": at this campaign's click cost,
+    // hitting the target needs CVR = CPC ÷ target. When the actual CVR is far
+    // below that, tuning the target is rearranging deck chairs — the post-click
+    // conversion rate is the binding constraint.
+    const cpc = w.clicks > 0 ? w.spend / w.clicks : null;
+    const neededCvr = cpc != null && w.target > 0 ? cpc / w.target : null;
+    const actualCvr = w.clicks > 0 ? w.conversions / w.clicks : null;
+    const cvrDiagnosis =
+      w.clicks >= 300 && neededCvr != null && actualCvr != null && actualCvr < neededCvr * 0.67;
+    const pc = (v) => `${(v * 100).toFixed(2)}%`;
+
+    const detail = cvrDiagnosis
+      ? `${w.name} is on Target CPA bidding set to ${fmt(w.target)}, but actual cost-per-conversion is ${fmt(w.actual)} — ${overPct}% above the target on ${fmt(w.spend)} of spend. The math says why: at ${fmt2(cpc)} per click, hitting the ${fmt(w.target)} target needs a ${pc(neededCvr)} conversion rate; this campaign converts at ${pc(actualCvr)} on ${w.clicks.toLocaleString("en-US")} clicks — ${(neededCvr / actualCvr).toFixed(1)}× short. The audience or post-click funnel cannot support this target; adjusting the bid target alone will not close a gap this size.`
+      : `${w.name} is on Target CPA bidding set to ${fmt(w.target)}, but actual cost-per-conversion is ${fmt(w.actual)} — ${overPct}% above the target on ${fmt(w.spend)} of spend. When a tCPA target isn't holding, it's usually one of three things: the target is set below what the auction can realistically deliver (so Google throttles volume chasing it), conversion tracking lag is understating recent conversions, or recent target changes haven't finished relearning.`;
+    const rootCause = cvrDiagnosis
+      ? `The conversion rate (${pc(actualCvr)}) is far below the ${pc(neededCvr)} this click cost requires for the target — a post-click (audience/offer/landing) constraint, not a bid-setting problem.`
+      : `The Target CPA bid is not being met: actual CPA runs ${overPct}% over the set target, pointing at an unrealistic target, tracking lag, or an unfinished learning period rather than a delivery setting.`;
+    const fixSteps = cvrDiagnosis
+      ? [
+          `Fix the conversion side first — audience fit and the post-click funnel — before trusting any tCPA on this campaign; the required ${pc(neededCvr)} CVR is ${(neededCvr / actualCvr).toFixed(1)}× what it achieves today.`,
+          `If you keep it running meanwhile, set the target near the achieved ${fmt(w.actual)} so Google stops throttling delivery chasing an unreachable number.`,
+          "Re-check after a full reporting cycle once the conversion-side fix is live.",
+        ]
+      : [
+          `Confirm the ${fmt(w.target)} target is realistic against this campaign's recent achieved CPA — raise it toward a reachable level if Google is under-delivering to chase it.`,
+          "Check conversion tracking for lag or under-counting that would inflate measured CPA.",
+          "If the target was changed recently, allow 1–2 weeks of relearning before judging it.",
+        ];
+
     findings.push(
       createFinding({
         ruleId: "GOOGLE-BID-002",
@@ -4384,14 +4463,21 @@ const addGoogleBidTargetFindings = ({ audit, dataset, findings }) => {
         severity,
         category: "Bidding Strategy Alignment",
         title: `${w.name} is missing its Target CPA — paying ${fmt(w.actual)} against a ${fmt(w.target)} target (${overPct}% over)`,
-        detail: `${w.name} is on Target CPA bidding set to ${fmt(w.target)}, but actual cost-per-conversion is ${fmt(w.actual)} — ${overPct}% above the target on ${fmt(w.spend)} of spend. When a tCPA target isn't holding, it's usually one of three things: the target is set below what the auction can realistically deliver (so Google throttles volume chasing it), conversion tracking lag is understating recent conversions, or recent target changes haven't finished relearning.`,
-        rootCause: `The Target CPA bid is not being met: actual CPA runs ${overPct}% over the set target, pointing at an unrealistic target, tracking lag, or an unfinished learning period rather than a delivery setting.`,
+        detail,
+        rootCause,
         evidence: {
           campaign: w.name,
           targetCpa: Math.round(w.target * 100) / 100,
           actualCpa: Math.round(w.actual * 100) / 100,
           percentOverTarget: overPct,
           spend: Math.round(w.spend),
+          ...(cvrDiagnosis
+            ? {
+                cpc: Math.round(cpc * 100) / 100,
+                requiredCvrPercent: Number((neededCvr * 100).toFixed(2)),
+                actualCvrPercent: Number((actualCvr * 100).toFixed(2)),
+              }
+            : {}),
           confidence: "high",
           minSamplePassed: true,
           // A bid-target guardrail ("raise/realign the target"), not measured
@@ -4399,12 +4485,10 @@ const addGoogleBidTargetFindings = ({ audit, dataset, findings }) => {
           // being scraped into the recoverable headline.
           advisory: true,
         },
-        estimatedImpact: `Closing the gap between the ${fmt(w.target)} target and the ${fmt(w.actual)} actual brings cost-per-conversion back in line with the goal you've already set for this campaign.`,
-        fixSteps: [
-          `Confirm the ${fmt(w.target)} target is realistic against this campaign's recent achieved CPA — raise it toward a reachable level if Google is under-delivering to chase it.`,
-          "Check conversion tracking for lag or under-counting that would inflate measured CPA.",
-          "If the target was changed recently, allow 1–2 weeks of relearning before judging it.",
-        ],
+        estimatedImpact: cvrDiagnosis
+          ? `The gap between the ${fmt(w.target)} target and the ${fmt(w.actual)} actual closes only when the conversion rate improves — the required ${pc(neededCvr)} vs the actual ${pc(actualCvr)} makes this a funnel problem wearing a bidding label.`
+          : `Closing the gap between the ${fmt(w.target)} target and the ${fmt(w.actual)} actual brings cost-per-conversion back in line with the goal you've already set for this campaign.`,
+        fixSteps,
       })
     );
   } else {
@@ -4817,7 +4901,7 @@ const addGoogleAudienceFragmentationFindings = ({ audit, dataset, findings }) =>
       },
       estimatedImpact: "No additional recoverable spend beyond the audience/campaign findings already counted — but isolating the segments lets Google optimise and concentrates budget on the audiences that convert.",
       fixSteps: [
-        "Rebuild the ad group as 2–3 ad groups, each with ONE market-specific audience segment, so performance is measurable per audience.",
+        "Rebuild the ad group as 2–3 ad groups, each with one market-specific audience segment, so performance is measurable per audience.",
         "Pause the audience segments with zero conversions once they're isolated and confirmed.",
         "Let each ad group accumulate ~30 conversions before layering a Target CPA on top.",
       ],
@@ -4838,6 +4922,9 @@ const addGoogleDeviceFindings = ({ audit, dataset, findings }) => {
   if (!records || records.length === 0) return;
   const currency = getReportCurrency(dataset, "GOOGLE");
   const fmt = (v) => formatMoney(v, currency);
+  const summary = getPlatformSummary(dataset, "GOOGLE");
+  const platformSpend = numberValue(summary.spend);
+  const accountBaseCpa = trustedAccountBaseline(dataset, "GOOGLE");
 
   const byCampaign = new Map();
   for (const r of records) {
@@ -4858,21 +4945,24 @@ const addGoogleDeviceFindings = ({ audit, dataset, findings }) => {
       const conv = numberValue(d.conversions);
       const clicks = numberValue(d.clicks);
       const cpa = conv > 0 ? spend / conv : null;
-      const gate = gateFinding({
-        spend,
-        clicks,
-        conversions: conv,
-        minSpend: 100,
-        minClicks: 40,
-        materialSpend: 500,
-      });
-      if (!gate.surface) continue;
+      // Currency-proof gates. Fixed thresholds like "spend ≥ 500" mean dollars in
+      // one account and pennies in another (PKR 650 ≈ $2.30) — so the gate is
+      // expressed in the account's own units: how many conversions this spend
+      // SHOULD have bought at the campaign's (or account's) cost per result.
+      const refCpa = campCpa ?? accountBaseCpa;
+      const expectedConversions = refCpa > 0 ? spend / refCpa : 0;
       let reason = null;
       let recoverable = 0;
       if (conv === 0) {
+        // A zero-conversion verdict is only trustworthy when the sample could
+        // have produced conversions: ≥100 clicks, or spend worth ≥3 expected
+        // conversions (P(0 observed | 3 expected) < 5%). Below that the honest
+        // verdict is "insufficient data", so no finding is emitted at all.
+        if (clicks < 100 && expectedConversions < 3) continue;
         reason = "zero_conversions";
         recoverable = spend;
       } else if (campCpa != null && cpa != null && cpa >= campCpa * 2) {
+        if (clicks < 40) continue;
         reason = "worse_than_campaign";
         recoverable = spend * (1 - campCpa / cpa);
       }
@@ -4887,7 +4977,8 @@ const addGoogleDeviceFindings = ({ audit, dataset, findings }) => {
         campCpa,
         reason,
         recoverable,
-        confidence: gate.confidence,
+        expectedConversions,
+        confidence: clicks >= 100 || expectedConversions >= 5 ? "high" : "medium",
       });
     }
   }
@@ -4895,29 +4986,38 @@ const addGoogleDeviceFindings = ({ audit, dataset, findings }) => {
   candidates.sort((a, b) => b.recoverable - a.recoverable);
 
   for (const w of candidates.slice(0, 2)) {
+    // Severity is proportional to how much of the account this slice actually
+    // burns — a device wasting 0.7% of account spend is a cleanup item, not a
+    // headline risk, no matter how bad its own numbers look.
+    const spendShare = platformSpend > 0 ? w.spend / platformSpend : 0;
     const severity =
-      w.reason === "zero_conversions" && w.spend >= 500 ? "HIGH" : "MEDIUM";
+      spendShare >= 0.05 ? "HIGH" : spendShare >= 0.01 ? "MEDIUM" : "LOW";
     findings.push(
       createFinding({
         ruleId: "GOOGLE-DEVICE-001",
         platform: "GOOGLE",
         severity,
         category: "Bidding Strategy Alignment",
+        // Capitalized device — a title that starts lowercase ("desktop on…")
+        // survives into bolded roadmap items where the renderer's first-char
+        // uppercase can't reach past the bold marker.
         title:
           w.reason === "zero_conversions"
-            ? `${w.device} on ${w.campaign} spent ${fmt(w.spend)} with zero conversions`
-            : `${w.device} on ${w.campaign} runs at ${fmt(w.cpa)} CPA vs ${fmt(w.campCpa)} for the campaign`,
+            ? `${String(w.device).charAt(0).toUpperCase()}${String(w.device).slice(1)} on ${w.campaign} spent ${fmt(w.spend)} with zero conversions`
+            : `${String(w.device).charAt(0).toUpperCase()}${String(w.device).slice(1)} on ${w.campaign} runs at ${fmt(w.cpa)} CPA vs ${fmt(w.campCpa)} for the campaign`,
         detail:
           w.reason === "zero_conversions"
-            ? `Within ${w.campaign}, the ${w.device} device generated ${w.clicks} clicks and ${fmt(w.spend)} in spend with zero conversions. A device bid modifier concentrates budget on the devices that actually convert.`
+            ? `Within ${w.campaign}, the ${w.device} device generated ${w.clicks} clicks and ${fmt(w.spend)} in spend (${(platformSpend > 0 ? (w.spend / platformSpend) * 100 : 0).toFixed(1)}% of account spend) with zero conversions — at the campaign's cost per result that spend should have produced about ${Math.round(w.expectedConversions)} conversion${Math.round(w.expectedConversions) === 1 ? "" : "s"}. A device bid modifier concentrates budget on the devices that actually convert.`
             : `Within ${w.campaign}, ${w.device} runs at ${fmt(w.cpa)} CPA — more than double the campaign's ${fmt(w.campCpa)} blended CPA. A negative device bid modifier rebalances spend toward better-converting devices.`,
         evidence: {
           campaign: w.campaign,
           device: w.device,
           currency: currency || "USD",
           spend: Math.round(w.spend),
+          spendSharePercent: Number(((platformSpend > 0 ? w.spend / platformSpend : 0) * 100).toFixed(1)),
           clicks: w.clicks,
           conversions: w.conv,
+          expectedConversions: Math.round(w.expectedConversions * 10) / 10,
           deviceCpa: w.cpa != null ? Math.round(w.cpa * 100) / 100 : null,
           campaignCpa: w.campCpa != null ? Math.round(w.campCpa * 100) / 100 : null,
           reason: w.reason,
@@ -4975,7 +5075,19 @@ const addGoogleLandingPageFindings = ({ audit, dataset, findings }) => {
   const ratio = worst.cvr > 0 ? worst.cvr / best.cvr : 0;
   const recoverable = worst.spend * (1 - ratio);
   const gap = worst.cvr > 0 ? best.cvr / worst.cvr : Infinity;
-  const severity = worst.cvr === 0 || gap >= 2 ? "HIGH" : "MEDIUM";
+
+  // "Route ALL traffic to the better page" is only a safe instruction when the
+  // better page's rate is proven on its own sample — the worst page can carry
+  // 100× the traffic (95k vs 700 spend). Wilson lower bound: recommend full
+  // consolidation only when even the pessimistic estimate of the best page's
+  // CVR still beats the worst page's observed CVR; otherwise prescribe a
+  // split-test and soften the money claim to "up to".
+  const bestSample = wilsonInterval(best.conversions, best.clicks);
+  const confidentlyBetter =
+    !!bestSample && best.conversions >= 5 && bestSample.low > worst.cvr;
+  const severity = confidentlyBetter
+    ? worst.cvr === 0 || gap >= 2 ? "HIGH" : "MEDIUM"
+    : "MEDIUM";
 
   const host = (u) => {
     try {
@@ -4995,23 +5107,36 @@ const addGoogleLandingPageFindings = ({ audit, dataset, findings }) => {
       title: twoDomains
         ? `Traffic is split across two domains — ${pctOf(worst.cvr)} vs ${pctOf(best.cvr)} conversion rate`
         : `Landing page ${worst.url} converts at ${pctOf(worst.cvr)} vs ${pctOf(best.cvr)} for your best page`,
-      detail: `${worst.url} converts at ${pctOf(worst.cvr)} while ${best.url} converts at ${pctOf(best.cvr)} on comparable traffic${twoDomains ? " — these are different domains serving the same funnel" : ""}. The clicks are paid for either way; the lower-converting page wastes the difference. Consolidating onto the better page (and auditing the weaker one for speed, mobile usability, and message match) closes the gap.`,
+      detail: `${worst.url} converts at ${pctOf(worst.cvr)} on ${worst.clicks.toLocaleString("en-US")} clicks while ${best.url} converts at ${pctOf(best.cvr)} on ${best.clicks.toLocaleString("en-US")} clicks${twoDomains ? " — these are different domains serving the same funnel" : ""}. The clicks are paid for either way; the lower-converting page wastes the difference.${confidentlyBetter ? " Consolidating onto the better page (and auditing the weaker one for speed, mobile usability, and message match) closes the gap." : ` The better page's sample (${formatConversions(best.conversions)} conversions on ${best.clicks.toLocaleString("en-US")} clicks) is promising but not yet conclusive at the weaker page's traffic volume — verify with a split test before fully consolidating.`}`,
       evidence: {
         currency: currency || "USD",
         worstUrl: worst.url,
         worstCvr: Number((worst.cvr * 100).toFixed(2)),
         worstSpend: Math.round(worst.spend),
+        worstClicks: worst.clicks,
         bestUrl: best.url,
         bestCvr: Number((best.cvr * 100).toFixed(2)),
+        bestClicks: best.clicks,
+        bestConversions: best.conversions,
+        bestCvrLow95: bestSample ? Number((bestSample.low * 100).toFixed(2)) : null,
+        confidentlyBetter,
         twoDomains,
-        minSamplePassed: true,
+        minSamplePassed: confidentlyBetter,
       },
-      estimatedImpact: `${fmt(recoverable)} of ${worst.url}'s spend is the conversion-rate gap vs your best page — recoverable by consolidating traffic onto it.`,
-      fixSteps: [
-        `Route paid traffic to ${best.url} and stop sending it to ${worst.url}.`,
-        `Run ${worst.url} through Google's Mobile-Friendly Test and PageSpeed Insights — slow or non-mobile pages are the usual cause of this gap.`,
-        "Match the weaker page's offer, headline, and load speed to the better page before resuming traffic to it.",
-      ],
+      estimatedImpact: confidentlyBetter
+        ? `${fmt(recoverable)} of ${worst.url}'s spend is the conversion-rate gap vs your best page — recoverable by consolidating traffic onto it.`
+        : `${fmt(recoverable)} of ${worst.url}'s spend is at stake in the conversion-rate gap — an upper bound that holds only if ${best.url}'s higher rate persists at full traffic volume; split-test to verify.`,
+      fixSteps: confidentlyBetter
+        ? [
+            `Route paid traffic to ${best.url} and stop sending it to ${worst.url}.`,
+            `Run ${worst.url} through Google's Mobile-Friendly Test and PageSpeed Insights — slow or non-mobile pages are the usual cause of this gap.`,
+            "Match the weaker page's offer, headline, and load speed to the better page before resuming traffic to it.",
+          ]
+        : [
+            `Split-test first: route 30–50% of ${worst.url}'s traffic to ${best.url} and compare conversion rates on matched volume.`,
+            `Run ${worst.url} through Google's Mobile-Friendly Test and PageSpeed Insights — slow or non-mobile pages are the usual cause of this gap.`,
+            `If ${best.url} holds its rate at higher volume, consolidate all paid traffic onto it.`,
+          ],
     })
   );
 };
@@ -5047,21 +5172,29 @@ const addGoogleGeoFindings = ({ audit, dataset, findings }) => {
   const totalSpend = countries.reduce((s, c) => s + c.spend, 0);
 
   const candidates = [];
+  // Currency-proof floor: a country must carry spend worth ≥3 conversions at the
+  // account's own cost per result (or ≥1% of geo spend) before it can be judged —
+  // fixed "500" means dollars in one account and pennies in another.
+  const geoMinSpend = Math.max((baseCpa || 0) * 3, totalSpend * 0.01) || 500;
   for (const c of countries) {
-    if (c.spend < 500) continue;
+    if (c.spend < geoMinSpend) continue;
     const cpa = c.conversions > 0 ? c.spend / c.conversions : null;
     const gate = gateFinding({
       spend: c.spend,
       clicks: c.clicks,
       conversions: c.conversions,
-      minSpend: 500,
+      minSpend: geoMinSpend,
       minClicks: 50,
-      materialSpend: 1000,
+      materialSpend: geoMinSpend * 2,
     });
     if (!gate.surface) continue;
     let reason = null;
     let recoverable = 0;
     if (c.conversions === 0) {
+      // A zero-conversion verdict needs a sample that could have converted:
+      // ≥100 clicks or spend worth ≥3 expected conversions at baseline.
+      const expected = baseCpa > 0 ? c.spend / baseCpa : 0;
+      if (c.clicks < 100 && expected < 3) continue;
       reason = "zero_conversions";
       recoverable = c.spend;
     } else if (baseCpa != null && cpa >= baseCpa * 2) {
@@ -5081,10 +5214,14 @@ const addGoogleGeoFindings = ({ audit, dataset, findings }) => {
   if (candidates.length === 0) return;
 
   const w = candidates.sort((a, b) => b.recoverable - a.recoverable)[0];
-  const severity =
+  // Base severity from the failure mode, then capped by how much of the account
+  // this market actually burns — a tiny-share leak is a cleanup, not a headline.
+  const geoBase =
     w.reason === "zero_conversions" || (w.cpa != null && baseCpa != null && w.cpa >= baseCpa * 3)
       ? "HIGH"
       : "MEDIUM";
+  const severity =
+    w.spendShare < 0.01 ? "LOW" : w.spendShare < 0.05 && geoBase === "HIGH" ? "MEDIUM" : geoBase;
   findings.push(
     createFinding({
       ruleId: "GOOGLE-GEO-001",
@@ -5697,7 +5834,9 @@ const addGoogleAllocationFindings = ({ audit, dataset, findings }) => {
       fixSteps: [
         `Re-enable "${winner.name}" today — it already converts at ${fmt(winner.cpa)} on ${Math.round(winner.conv)} conversions.`,
         active.length === 1
-          ? `Cut or pause the live "${active[0].name}" (${fmt(active[0].cpa != null ? active[0].cpa : activeCpa)} CPA); if keeping it for data, drop its budget sharply.`
+          ? numberValue(active[0].budget) > 0
+            ? `Cut or pause the live "${active[0].name}" (${fmt(active[0].cpa != null ? active[0].cpa : activeCpa)} CPA); if keeping it for data, cut its ${fmt(numberValue(active[0].budget))}/day budget to about ${fmt(numberValue(active[0].budget) / 3)}/day.`
+            : `Cut or pause the live "${active[0].name}" (${fmt(active[0].cpa != null ? active[0].cpa : activeCpa)} CPA); if keeping it for data, drop its budget sharply.`
           : `Redirect budget from the weaker live campaigns toward the re-enabled winner.`,
         "Confirm the re-enabled campaign keeps its prior targeting/bid settings so it resumes at its proven efficiency.",
       ],
@@ -5748,6 +5887,127 @@ const addGoogleHygieneFindings = ({ audit, dataset, findings }) => {
         "Review the zero-delivery campaigns and archive or delete the ones you don't intend to relaunch.",
         "Keep only live or intentionally-paused campaigns in the active view so the structure stays legible.",
         "Adopt a monthly cleanup pass so dead campaigns don't accumulate.",
+      ],
+    })
+  );
+};
+
+/**
+ * OPP-RMK-001 — no live remarketing coverage. Warm audiences (site visitors,
+ * video viewers, customer lists) consistently convert at a multiple of cold
+ * traffic; an account with real conversion volume and no user-list audience on
+ * any spending campaign is leaving its cheapest conversions unclaimed. Fires
+ * ONLY when the pull actually included audience-level data — absence of
+ * evidence is not evidence of absence — and when there is volume worth
+ * remarketing to.
+ */
+const addGoogleRemarketingFindings = ({ audit, dataset, findings }) => {
+  if (!audit.selectedPlatforms.includes("GOOGLE")) return;
+  const audienceCriteria = getRecordsByLevel(dataset, "GOOGLE", "audience");
+  const audPerf = getRecordsByLevel(dataset, "GOOGLE", "audience_performance");
+  // Audience grain wasn't pulled → we cannot verify absence; stay silent.
+  if (audienceCriteria.length === 0 && audPerf.length === 0) return;
+
+  const campaigns = getRecordsByLevel(dataset, "GOOGLE", "campaign");
+  if (campaigns.length === 0) return;
+  const spendByCampaign = new Map();
+  let totalConversions = 0;
+  for (const c of campaigns) {
+    const spend = numberValue(c.spend);
+    if (c.campaignId) spendByCampaign.set(String(c.campaignId), spend);
+    if (c.name) spendByCampaign.set(String(c.name), spend);
+    totalConversions += numberValue(c.results ?? c.conversions);
+  }
+  // Too little conversion volume to build a warm pool worth a campaign.
+  if (totalConversions < 30) return;
+
+  const isUserList = (r) =>
+    !!r.userListResourceName ||
+    !!r.userList ||
+    /USER_LIST|REMARKET|RLSA/i.test(String(r.audienceType || ""));
+  const campaignSpendOf = (r) =>
+    numberValue(spendByCampaign.get(String(r.campaignId)) ?? spendByCampaign.get(String(r.campaignName)) ?? 0);
+
+  const userListRows = [...audienceCriteria, ...audPerf].filter(isUserList);
+  const liveUserLists = userListRows.filter((r) => campaignSpendOf(r) > 0);
+  if (liveUserLists.length > 0) return; // remarketing is live — nothing to flag
+
+  const idleCampaignNames = [
+    ...new Set(userListRows.map((r) => r.campaignName).filter(Boolean)),
+  ].slice(0, 3);
+  const assetNote = userListRows.length
+    ? ` Remarketing lists are already built and attached to ${idleCampaignNames.length ? "paused campaigns" : "the account"}${idleCampaignNames.length ? ` (e.g. ${idleCampaignNames.map((n) => `"${n}"`).join(", ")})` : ""} — the asset exists; nothing live uses it.`
+    : "";
+
+  findings.push(
+    createFinding({
+      ruleId: "OPP-RMK-001",
+      platform: "GOOGLE",
+      severity: "MEDIUM",
+      category: "Audience & Attribution",
+      title: "No remarketing is running — warm audiences sit unused",
+      detail: `No spending campaign uses a remarketing (user-list) audience, while the account generated ${formatConversions(totalConversions)} conversions this window — a warm pool of engaged visitors nobody is re-contacting.${assetNote} Remarketing traffic typically converts at a multiple of cold prospecting because the audience already knows the offer.`,
+      rootCause: "Acquisition campaigns were built without a retention/re-engagement layer, so every conversion path starts from cold traffic at full cost.",
+      evidence: {
+        userListAudiencesFound: userListRows.length,
+        liveUserListAudiences: 0,
+        conversionsThisWindow: Math.round(totalConversions),
+        confidence: "high",
+        minSamplePassed: true,
+        // Structural opportunity — no measured dollar to scrape.
+        advisory: true,
+      },
+      estimatedImpact: "Not quantified from this window's data — but warm-audience campaigns routinely deliver the account's cheapest conversions, so this is usually the highest-leverage build item.",
+      fixSteps: [
+        // The lists-exist nuance must live in step 1: the opportunities table
+        // surfaces only the first step, and "the asset exists, it just isn't
+        // live" is the difference between a build task and a flip-the-switch.
+        userListRows.length
+          ? "Re-activate the remarketing lists already built (they sit on paused campaigns) — verify site visitors, video viewers, and past-converter lists in Audience Manager, then attach them to a live campaign."
+          : "Create remarketing lists in Audience Manager: site visitors, video viewers, and past converters.",
+        "Launch one dedicated remarketing campaign at roughly 5–10% of account budget, with a cost target at or below your account average.",
+        "Exclude recent converters if the offer is one-time, and cap frequency so the warm pool isn't fatigued.",
+      ],
+    })
+  );
+};
+
+/**
+ * GOOGLE-HYGIENE-002 — spending ad groups still on default names ("Ad group 1").
+ * Pure hygiene, but it makes every segment-level report (this one included)
+ * harder to read, and it is the tell of an account managed ad hoc.
+ */
+const addGoogleAdGroupNamingFindings = ({ audit, dataset, findings }) => {
+  if (!audit.selectedPlatforms.includes("GOOGLE")) return;
+  const adGroups = getRecordsByLevel(dataset, "GOOGLE", "adset");
+  const spending = adGroups.filter((g) => numberValue(g.spend) > 0);
+  if (spending.length < 3) return;
+  const generic = spending.filter((g) => /^ad group(\s*#?\d+)?$/i.test(String(g.name || "").trim()));
+  if (generic.length < Math.ceil(spending.length / 2)) return;
+
+  const examples = [
+    ...new Set(generic.map((g) => g.campaignName).filter(Boolean)),
+  ].slice(0, 3);
+  findings.push(
+    createFinding({
+      ruleId: "GOOGLE-HYGIENE-002",
+      platform: "GOOGLE",
+      severity: "LOW",
+      category: "Campaign Structure",
+      title: `${generic.length} of ${spending.length} spending ad groups still use default names`,
+      detail: `Ad groups carrying real spend are still named "Ad group 1"${examples.length ? ` (in ${examples.map((n) => `"${n}"`).join(", ")})` : ""}. Default names make audience/creative comparisons unreadable at a glance and are the usual tell of ad-hoc account management — every later analysis (including this audit's segment tables) has to fall back to campaign names.`,
+      rootCause: "Ad groups were created with defaults and never renamed — there is no naming convention encoding market/audience/creative.",
+      evidence: {
+        genericAdGroups: generic.length,
+        spendingAdGroups: spending.length,
+        examples,
+        spend: 0,
+        confidence: "high",
+      },
+      estimatedImpact: "No spend impact — structural hygiene that makes performance legible per audience and market.",
+      fixSteps: [
+        "Adopt a naming convention (market | audience | creative angle) and rename the spending ad groups first.",
+        "Apply the same convention to new builds so segment reports stay readable.",
       ],
     })
   );
@@ -5827,31 +6087,71 @@ const addGoogleExtensionFindings = ({ audit, dataset, findings }) => {
   );
 };
 
-const calculateScores = ({ audit, findings }) => {
+// A score for a dimension the account doesn't use is meaningless — "Keyword
+// Strategy 92" on a Display-only account with no keyword targeting has no
+// visible basis and reads as invented. Each probe answers "does this account
+// have data this category could be scored on?". A category with findings is
+// always applicable (the findings ARE the basis); otherwise the probe decides.
+// Categories without a probe are always scored.
+const CATEGORY_APPLICABILITY = {
+  GOOGLE: {
+    "Keyword Strategy": (dataset) =>
+      (getRecordsByLevel(dataset, "GOOGLE", "keyword") || []).length > 0 ||
+      (getRecordsByLevel(dataset, "GOOGLE", "search_term") || []).length > 0,
+    "Quality Score & Relevance": (dataset) =>
+      (getRecordsByLevel(dataset, "GOOGLE", "keyword") || []).some(
+        (k) => numberValue(k.qualityScore) > 0
+      ) || (getRecordsByLevel(dataset, "GOOGLE", "landing_page") || []).length > 0,
+    "Ad Copy & Extensions": (dataset) =>
+      (getRecordsByLevel(dataset, "GOOGLE", "ad") || []).length > 0 ||
+      (getRecordsByLevel(dataset, "GOOGLE", "asset") || []).length > 0,
+  },
+};
+
+const calculateScores = ({ audit, dataset, findings }) => {
   const platforms = {};
 
   for (const platform of audit.selectedPlatforms) {
     const platformFindings = findings.filter((finding) => finding.platform === platform);
     const categoryWeights = PLATFORM_CATEGORIES[platform];
+    const probes = CATEGORY_APPLICABILITY[platform] || {};
     const categories = {};
+    const categoryMeta = {};
 
     for (const category of Object.keys(categoryWeights)) {
       const categoryFindings = platformFindings.filter(
         (finding) => finding.category === category
       );
+      const probe = probes[category];
+      const applicable =
+        categoryFindings.length > 0 || !probe || (dataset ? probe(dataset) : false);
+      categoryMeta[category] = { findingCount: categoryFindings.length, applicable };
+      if (!applicable) continue; // no data to score → excluded, weights renormalize
+
       const penalty = categoryFindings.reduce(
         (total, finding) => total + SEVERITY_PENALTIES[finding.severity],
         0
       );
 
-      categories[category] = Math.max(0, 100 - penalty);
+      let categoryScore = Math.max(0, 100 - penalty);
+      // A CRITICAL finding is not a routine deduction: a category carrying one
+      // must not present as near-healthy (fake conversions left Tracking &
+      // Pixel Health at 75 while the reference audit scored it 2/10).
+      if (categoryFindings.some((f) => f.severity === "CRITICAL")) {
+        categoryScore = Math.min(categoryScore, 40);
+      }
+      categories[category] = categoryScore;
     }
 
+    const applicableWeightTotal = Object.keys(categories).reduce(
+      (total, category) => total + categoryWeights[category],
+      0
+    );
     const weightedScore =
       Object.entries(categories).reduce(
         (total, [category, score]) => total + score * categoryWeights[category],
         0
-      ) / Object.values(categoryWeights).reduce((total, weight) => total + weight, 0);
+      ) / Math.max(1, applicableWeightTotal);
 
     // The category scores already bake in severity penalties. The old global
     // `100 - totalPenalty` cap applied them a SECOND time and, because the engine
@@ -5863,9 +6163,22 @@ const calculateScores = ({ audit, findings }) => {
     const highCount = platformFindings.filter((f) => f.severity === "HIGH").length;
     const densityPenalty = Math.min(6 * criticalCount + 3 * highCount, 25);
 
+    // When the platform's DATA cannot be trusted (a critical conversion-tracking
+    // anomaly, or physically impossible source numbers), every other category
+    // score is computed from unverified figures — the platform must not band as
+    // "Good" until tracking is fixed. Cap below the Good threshold.
+    const dataUntrusted = platformFindings.some(
+      (f) =>
+        f.severity === "CRITICAL" &&
+        (f.evidence?.diagnostic === true || f.evidence?.dataIntegrityBroken === true)
+    );
+    let platformScore = Math.round(Math.max(0, Math.min(100, weightedScore - densityPenalty)));
+    if (dataUntrusted) platformScore = Math.min(platformScore, 55);
+
     platforms[platform] = {
-      score: Math.round(Math.max(0, Math.min(100, weightedScore - densityPenalty))),
+      score: platformScore,
       categories,
+      categoryMeta,
       findingCount: platformFindings.length,
     };
   }
@@ -5958,6 +6271,28 @@ const refreshStoredNormalization = (dataset) => {
   }
 };
 
+/**
+ * When GOOGLE-ALLOC-001 names a single live campaign as the pause/cut
+ * candidate, prefix every other finding that prescribes work ON that campaign
+ * with a note saying so. Keeps the report internally consistent: the client
+ * never reads "pause X" and "tune X's target" as competing advice.
+ */
+const alignFindingsWithAllocation = (findings) => {
+  const alloc = findings.find((f) => f.ruleId === "GOOGLE-ALLOC-001");
+  const pauseCandidate = alloc?.evidence?.liveCampaign;
+  if (!pauseCandidate) return findings;
+  for (const f of findings) {
+    if (f === alloc || f.ruleId === "GOOGLE-ALLOC-001") continue;
+    if (f.evidence?.campaign !== pauseCandidate) continue;
+    if (!Array.isArray(f.fixSteps) || f.fixSteps.length === 0) continue;
+    f.fixSteps = [
+      `Decide "${pauseCandidate}"'s fate per the lead finding first — pausing or cutting it resolves this finding too; the steps below apply only if you keep it running.`,
+      ...f.fixSteps,
+    ];
+  }
+  return findings;
+};
+
 export const runDeterministicAudit = (audit) => {
   const dataset = audit.normalizedDataset;
 
@@ -6024,6 +6359,8 @@ export const runDeterministicAudit = (audit) => {
   addGoogleAdStrengthFindings({ audit, dataset, findings });
   addGoogleAllocationFindings({ audit, dataset, findings });
   addGoogleHygieneFindings({ audit, dataset, findings });
+  addGoogleAdGroupNamingFindings({ audit, dataset, findings });
+  addGoogleRemarketingFindings({ audit, dataset, findings });
   addGoogleExtensionFindings({ audit, dataset, findings });
   addCompoundFindings({ audit, findings });
 
@@ -6042,7 +6379,13 @@ export const runDeterministicAudit = (audit) => {
   // `evidence.netRecoverable` so the report body can never sum past the headline.
   const finalFindings = applyTrustLayer({ findings: collapsed, dataset });
 
-  const scores = calculateScores({ audit, findings: finalFindings });
+  // Cross-finding coherence: when the allocation finding says "pause/cut the
+  // live campaign", other findings prescribing tweaks ON that campaign must
+  // acknowledge it — "pause X" in finding 1 and "raise X's bid target" in
+  // finding 3 reads self-contradictory to the client.
+  alignFindingsWithAllocation(finalFindings);
+
+  const scores = calculateScores({ audit, dataset, findings: finalFindings });
   const report = buildDeterministicSummary({ audit, dataset, findings: finalFindings, scores });
 
   return {

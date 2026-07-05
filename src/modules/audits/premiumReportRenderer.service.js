@@ -12,7 +12,9 @@ const markdown = (value) =>
     .replace(/\*\*(.*?)\*\*/g, "<b>$1</b>")
     .replace(/\n/g, "<br>");
 
-const toneFill = (tone) => (tone === "warn" ? "#D29A4A" : "#1B5742");
+// Chart fills follow the app theme: violet is the brand series, amber the
+// warning series (matches the dashboard's --violet / --amber accents).
+const toneFill = (tone) => (tone === "warn" ? "#D29A4A" : "#6d4dff");
 const severityClass = (severity) => `sev-${String(severity || "LOW").toLowerCase()}`;
 
 const hiddenFields = new Set([
@@ -57,7 +59,13 @@ const sentenceCase = (value) => {
   return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
 };
 
-const humanLabel = (value) => labelMap[value] || sentenceCase(value);
+// Only field keys ("estimatedImpact", "sample_size") get sentence-cased.
+// Anything with whitespace is already human prose — sentence-casing it would
+// lowercase legitimate capitals ("Thursday" → "thursday", "PKR" → "pkr").
+// Bare keys still get the acronym restore ("CVR" header must not become "Cvr").
+const humanLabel = (value) =>
+  labelMap[value] ||
+  (/\s/.test(String(value ?? "")) ? cleanClientText(value) : cleanClientText(sentenceCase(value)));
 
 const cleanClientText = (value) =>
   String(value ?? "")
@@ -76,11 +84,14 @@ const cleanClientText = (value) =>
     )
     .replace(/\bdayOfWeek\b/g, "day of week")
     .replace(/\b([A-Z]{3,})(?:_([A-Z]{2,}))*\b/g, (match) => sentenceCase(match))
-    .replace(/[_-]+/g, " ")
+    // Underscores are enum debris ("TARGET_CPA") — but hyphens are legitimate
+    // prose ("re-enable", "post-click", "-100% bid modifier"); stripping them
+    // mangled every sentence and even ate the minus in "-100%".
+    .replace(/_+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/\b(Pkr|Usd|Eur|Gbp|Aed|Inr|Cad|Aud|Nzd|Sgd|Sar|Try|Jpy|Zar)\b/g, (m) => m.toUpperCase())
-    .replace(/\b(Cpa|Cpc|Cpm|Ctr|Roas)\b/g, (m) => m.toUpperCase())
+    .replace(/\b(Cpa|Cpc|Cpm|Ctr|Cvr|Cta|Cpl|Cpv|Aov|Ltv|Mer|Roi|Kpi|Api|Url|Vsl|Crm|Sku|Roas)\b/g, (m) => m.toUpperCase())
     .replace(/^([a-z])/, (m) => m.toUpperCase());
 
 const isHiddenField = (field) => {
@@ -88,8 +99,14 @@ const isHiddenField = (field) => {
   return hiddenFields.has(key) || key.startsWith("_") || key.startsWith("internal_") || key.startsWith("raw_");
 };
 
-const moneyLikeLabel = (label) =>
-  /(spend|revenue|budget|cpa|cpc|cost|impact|recoverable|waste|value|amount)/i.test(String(label || ""));
+const moneyLikeLabel = (label) => {
+  const text = String(label || "");
+  // A label that names a COUNT of things is never money, even when it also
+  // contains a money word — "Spending ad sets: 11" must render "11", not
+  // "PKR 11".
+  if (/(count|number|sets|groups|campaigns|keywords|ads\b|items|segments|days)/i.test(text)) return false;
+  return /(spend|revenue|budget|cpa|cpc|cost|impact|recoverable|waste|value|amount)/i.test(text);
+};
 
 const formatCellValue = (value, label = "", currency = "USD") => {
   if (value === null || value === undefined) return "";
@@ -137,12 +154,12 @@ const isProseCell = (value) => {
 };
 
 const emphasizeNumbers = (html) =>
-  html.replace(/((?:[A-Z]{3}|\$)\s?[\d,]+(?:\.\d+)?|[\d,]+(?:\.\d+)?%)/g, '<span class="num">$1</span>');
+  html.replace(/((?:[A-Z]{3}|\$)\s?[\d,]+(?:\.\d+)?|[-−]?[\d,]+(?:\.\d+)?%)/g, '<span class="num">$1</span>');
 
 const bandColor = (band) => {
-  if (["Excellent", "Good"].includes(band)) return "#6FBF94";
-  if (band === "Fair") return "#D29A4A";
-  return "#E07A72";
+  if (["Excellent", "Good"].includes(band)) return "#2ecfb3"; // app teal
+  if (band === "Fair") return "#f5b942"; // app amber
+  return "#ff6b6b"; // app coral
 };
 
 const formatPeriod = (period = {}) => {
@@ -178,7 +195,9 @@ const renderScoreGauge = (score, band = "Good", caption = "Component-level break
 
 const renderMasthead = (doc, branding = {}) => {
   const m = doc.masthead;
-  const bgColor = branding.primaryColor || "#0F3A2C";
+  // Default masthead = the app theme's deep-violet surface; an org's own
+  // primaryColor (white-label branding) still overrides it.
+  const bgColor = branding.primaryColor || "#0f0a1a";
   const auditedBy = branding.preparedBy || "AdAdviser Engine + AI Strategist";
 
   const logoHtml = branding.logoBase64
@@ -203,7 +222,7 @@ const renderMasthead = (doc, branding = {}) => {
       </div>
     </div>
     <div class="mast-meta">
-      <span>Prepared for<b>Client Account</b></span>
+      <span>Prepared for<b>${escapeHtml(branding.clientName || m.prepared_for || "Client Account")}</b></span>
       <span>Period<b>${escapeHtml(formatPeriod(m.period))}</b></span>
       <span>Audited by<b>${escapeHtml(auditedBy)}</b></span>
       <span>Data<b>${m.tracking_verified ? "Tracking verified" : "Tracking caveat"}</b></span>
@@ -241,23 +260,69 @@ const renderExecutiveSummary = (summary = {}) => `
     ${renderProjection(summary.projection)}
   </section>`;
 
+// Wrap a chart label into at most `maxLines` lines of ~`maxChars` characters.
+// SVG <text> does not wrap on its own: without this, a long finding title
+// overflows LEFT past the viewBox edge and is clipped mid-sentence.
+const wrapChartLabel = (label, maxChars = 32, maxLines = 2) => {
+  const words = String(label || "").split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    if (!line) line = word;
+    else if ((line + " " + word).length <= maxChars) line += " " + word;
+    else {
+      lines.push(line);
+      line = word;
+      if (lines.length === maxLines) break;
+    }
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  if (lines.length === maxLines && words.join(" ").length > lines.join(" ").length) {
+    lines[maxLines - 1] = lines[maxLines - 1].slice(0, maxChars - 1).trimEnd() + "…";
+  }
+  return lines.length ? lines : [""];
+};
+
 const renderHorizontalBars = (block) => {
   const rows = block.rows || [];
   if (!rows.length) return "";
   if (rows.length < 3 && block.kind === "score") return renderScoreGauge(block.score, block.score_band, block.caption);
-  if (rows.length < 3 && !block.allowFewRows) return renderEvidenceTable({ rows: rows.map((row) => ({ metric: row.label, value: row.display ?? row.value })) });
+  if (rows.length < 3 && !block.allowFewRows) {
+    // Too few rows for a meaningful chart → table fallback. These rows are
+    // finding titles + money, not evidence fields, so label the columns as such
+    // — and the caption (e.g. "the bars sum to the headline total") must
+    // survive the fallback, it carries the money-coherence promise.
+    const table = renderEvidenceTable({
+      currency: block.currency,
+      headers: ["Finding", "Recoverable"],
+      rows: rows.map((row) => ({ metric: row.label, value: row.display ?? row.value })),
+    });
+    if (!table) return "";
+    return `${table}${block.caption ? `<p class="chart-cap">${escapeHtml(cleanClientText(block.caption))}</p>` : ""}`;
+  }
   const labelW = 220;
   const barW = 420;
-  const rowH = 34;
-  const h = rows.length * rowH + 34;
+  const CHAR_W = 7.2; // ≈ width of one value character at the .bv font size
+
+  // Pre-wrap labels so row heights are known before laying out.
+  const wrapped = rows.map((row) => wrapChartLabel(cleanClientText(row.label)));
+  const rowHeights = wrapped.map((lines) => (lines.length > 1 ? 44 : 34));
+  const rowOffsets = rowHeights.reduce((acc, h, i) => {
+    acc.push(i === 0 ? 0 : acc[i - 1] + rowHeights[i - 1]);
+    return acc;
+  }, []);
+  const chartH = rowHeights.reduce((a, b) => a + b, 0);
+  const h = chartH + 34;
   return `<div class="chart"><svg viewBox="0 0 720 ${h}" role="img" aria-label="${escapeHtml(block.caption || "Horizontal bar chart")}">
-    ${block.gridlines ? [25, 50, 75, 100].map((v) => `<line class="grid" x1="${labelW + (v / 100) * barW}" y1="0" x2="${labelW + (v / 100) * barW}" y2="${rows.length * rowH}"/>`).join("") : ""}
+    ${block.gridlines ? [25, 50, 75, 100].map((v) => `<line class="grid" x1="${labelW + (v / 100) * barW}" y1="0" x2="${labelW + (v / 100) * barW}" y2="${chartH}"/>`).join("") : ""}
     ${rows
       .map((row, i) => {
-        const y = 10 + i * rowH;
+        const rowH = rowHeights[i];
+        const yTop = rowOffsets[i];
+        const yBar = yTop + Math.round((rowH - 16) / 2);
         const max = Number(row.max) || 100;
         const width = Math.max(2, Math.min(barW, (Number(row.value) / max) * barW));
-        const label = escapeHtml(cleanClientText(row.label));
+        const labelLines = wrapped[i];
         // Score rows are 0-100 points, never money/percent. Render them verbatim
         // so a category label like "Bidding & Budget" can't be mis-detected as
         // money and printed as "USD 100".
@@ -266,12 +331,25 @@ const renderHorizontalBars = (block) => {
             ? String(row.display ?? row.value)
             : formatCellValue(row.display ?? row.value, row.label, block.currency)
         );
-        return `<text class="bl" x="${labelW - 12}" y="${y + 13}" text-anchor="end">${label}</text>
-          <rect x="${labelW}" y="${y}" width="${width.toFixed(1)}" height="16" rx="2.5" fill="${toneFill(row.tone)}"/>
-          <text class="${width > 42 ? "bvw" : "bv"}" x="${width > 42 ? labelW + width - 10 : labelW + width + 8}" y="${y + 13}" text-anchor="${width > 42 ? "end" : "start"}">${display}</text>`;
+        // The value goes INSIDE the bar only when it genuinely fits there;
+        // otherwise it sits to the right of the bar. A fixed "width > 42" put
+        // "PKR 3,434" (≈65px) inside a 45px bar, spilling left over the label.
+        const displayW = display.length * CHAR_W;
+        const fitsInside = width >= displayW + 16;
+        const fitsOutside = labelW + width + 8 + displayW <= 714;
+        const inside = fitsInside || !fitsOutside;
+        const labelText = labelLines
+          .map((line, li) => {
+            const lineY = labelLines.length > 1 ? yTop + 14 + li * 13 : yBar + 13;
+            return `<text class="bl" x="${labelW - 12}" y="${lineY}" text-anchor="end">${escapeHtml(line)}</text>`;
+          })
+          .join("");
+        return `${labelText}
+          <rect x="${labelW}" y="${yBar}" width="${width.toFixed(1)}" height="16" rx="2.5" fill="${toneFill(row.tone)}"/>
+          <text class="${inside ? "bvw" : "bv"}" x="${inside ? labelW + width - 10 : labelW + width + 8}" y="${yBar + 13}" text-anchor="${inside ? "end" : "start"}">${display}</text>`;
       })
       .join("")}
-    <line class="ax" x1="${labelW}" y1="0" x2="${labelW}" y2="${rows.length * rowH}"/>
+    <line class="ax" x1="${labelW}" y1="0" x2="${labelW}" y2="${chartH}"/>
   </svg>${block.caption ? `<p class="chart-cap">${escapeHtml(block.caption)}</p>` : ""}</div>`;
 };
 
@@ -332,6 +410,7 @@ const renderLineChart = (block) => {
 const renderEvidenceTable = (block) => {
   const currency = block.currency || "USD";
   const prose = String(block.proseContext || "");
+  const [headLeft, headRight] = Array.isArray(block.headers) ? block.headers : ["Evidence", "Value"];
   const rows = (block.rows || [])
     .filter((row) => !isHiddenField(row.metric))
     .map((row) => {
@@ -343,7 +422,7 @@ const renderEvidenceTable = (block) => {
     .filter((row) => !prose || !prose.includes(String(row.value)))
     .slice(0, 8);
   if (!rows.length) return "";
-  return `<table class="evidence-table"><thead><tr><th>Evidence</th><th class="num">Value</th></tr></thead><tbody>${rows
+  return `<table class="evidence-table"><thead><tr><th>${escapeHtml(headLeft)}</th><th class="num">${escapeHtml(headRight)}</th></tr></thead><tbody>${rows
     .map((row) => `<tr><td>${escapeHtml(row.metric)}</td><td class="num ${row.highlight ? "highlight" : ""}">${escapeHtml(row.value)}</td></tr>`)
     .join("")}</tbody></table>`;
 };
@@ -581,17 +660,17 @@ const renderMethod = (notes = []) =>
         .join("")}</ul></section>`
     : "";
 
-export const premiumReportStyles = `.brand-logo{max-height:48px;max-width:180px;object-fit:contain;display:block}:root{--ink:#16211B;--soft:#46524B;--muted:#7C857F;--faint:#A8AFA9;--line:#E6E8E3;--line-strong:#16211B;--brand:#1B5742;--brand-deep:#0F3A2C;--money:#0E7A4F;--money-bg:#EBF5EF;--amber:#B26A12;--amber-fill:#D29A4A;--amber-bg:#FBF3E6;--red:#B3261E;--red-bg:#FBEAE9;--paper:#FFFFFF;--paper-tint:#FBFBF8}*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',system-ui,sans-serif;color:var(--ink);background:var(--paper-tint);font-size:15px;line-height:1.7;-webkit-font-smoothing:antialiased}.sheet{max-width:820px;margin:40px auto;background:var(--paper);box-shadow:0 1px 2px rgba(22,33,27,.05),0 12px 40px rgba(22,33,27,.07);border:1px solid var(--line)}.pad{padding:0 72px}.masthead{background:var(--brand-deep);color:#fff;padding:48px 72px 44px;position:relative;overflow:hidden}.masthead:after{content:'';position:absolute;right:-80px;top:-80px;width:340px;height:340px;border-radius:50%;border:1px solid rgba(255,255,255,.10);box-shadow:0 0 0 48px rgba(255,255,255,.04),0 0 0 110px rgba(255,255,255,.03)}.mast-brand{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:40px;position:relative;z-index:1}.logo{font:600 15px 'Inter';letter-spacing:.02em}.doc-type{font:600 11px 'IBM Plex Mono';letter-spacing:.14em;text-transform:uppercase;color:#9DBFAE}.mast-grid{display:grid;grid-template-columns:1fr auto;gap:40px;align-items:end;position:relative;z-index:1}.mast-title h1{font:600 34px/1.18 'Fraunces',serif;letter-spacing:-.015em;margin-bottom:18px}.mast-sub{font-size:14px;color:#BBCFC2;max-width:430px}.gauge{text-align:center}.gauge svg{display:block;margin:0 auto 4px}.g-num{font:700 38px/1 'Fraunces';fill:#fff}.g-of{font:500 11px 'IBM Plex Mono';fill:#9DBFAE}.g-band{display:inline-block;font:600 11px 'Inter';letter-spacing:.06em;text-transform:uppercase;padding:4px 14px;border-radius:99px;background:rgba(210,154,74,.18);color:#E8C285;border:1px solid rgba(232,194,133,.35)}.mast-meta{display:flex;flex-wrap:wrap;gap:8px 36px;margin-top:36px;padding-top:22px;border-top:1px solid rgba(255,255,255,.14);font-size:12.5px;color:#9DBFAE;position:relative;z-index:1}.mast-meta b{color:#fff;font-weight:600;margin-left:6px}.keystrip{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line)}.kcell{padding:26px 20px 22px;text-align:center}.kcell+.kcell{border-left:1px solid var(--line)}.kcell b{display:block;font:600 26px 'Fraunces';letter-spacing:-.01em}.kcell b.good,.highlight{color:var(--money)}.kcell b.warn{color:var(--amber)}.kcell span{font-size:11.5px;color:var(--muted);font-weight:500;letter-spacing:.02em}.body-wrap{padding-top:56px;padding-bottom:72px}.eyebrow{font:600 11px 'IBM Plex Mono';letter-spacing:.16em;text-transform:uppercase;color:var(--brand);margin-bottom:10px}h2{font:600 24px/1.25 'Fraunces',serif;letter-spacing:-.01em;margin:0 0 16px}.section{margin-bottom:64px}.section-rule{display:flex;align-items:center;gap:14px;margin-bottom:28px}.section-rule .no{font:600 13px 'IBM Plex Mono';color:var(--faint)}.section-rule .ln{flex:1;height:1px;background:var(--line)}h3{font:600 17px 'Fraunces',serif;margin:20px 0 10px}p{margin:0 0 15px;color:var(--soft)}p b,li b{color:var(--ink);font-weight:600}.small{font-size:12.5px;color:var(--muted)}.mono{font-family:'IBM Plex Mono',monospace;font-size:.9em}.verdict{margin:8px 0 30px;padding:26px 30px;background:var(--money-bg);border-radius:4px;border-left:4px solid var(--money)}.verdict p{font:500 18px/1.55 'Fraunces',serif;color:var(--ink);margin:0}table{width:100%;border-collapse:collapse;margin:18px 0 10px;font-size:13.5px}th{text-align:left;font:600 11px 'Inter';text-transform:uppercase;letter-spacing:.08em;color:var(--muted);border-bottom:2px solid var(--line-strong);padding:9px 14px 9px 0}td{border-bottom:1px solid var(--line);padding:12px 14px 12px 0;vertical-align:top;color:var(--soft)}tr:last-child td{border-bottom:2px solid var(--line-strong)}td.num,th.num{text-align:right;font:500 12.5px 'IBM Plex Mono';white-space:nowrap}.tnote{font-size:12px;color:var(--muted);margin-bottom:24px}.tag{display:inline-block;font:600 10.5px 'Inter';letter-spacing:.04em;padding:2px 9px;border-radius:99px;background:var(--amber-bg);color:var(--amber)}.tag.sev-critical{background:var(--red-bg);color:var(--red)}.tag.sev-high{background:#FFF1E7;color:#C2410C}.tag.sev-low{background:#F3F4F6;color:#4B5563}.chart{margin:26px 0 12px}.chart svg{display:block;width:100%;height:auto}.chart-cap{font-size:12px;color:var(--muted);margin-bottom:22px}.bl{font:500 12.5px 'Inter';fill:var(--soft)}.bv{font:600 12px 'IBM Plex Mono';fill:var(--ink)}.bvw{font:600 12px 'IBM Plex Mono';fill:#fff}.grid{stroke:#EFF0EC;stroke-width:1}.ax{stroke:var(--ink);stroke-width:1.5}.projection{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;margin:26px 0 8px;border-top:2px solid var(--line-strong);border-bottom:2px solid var(--line-strong)}.proj-cell{padding:20px 22px;display:flex;flex-direction:column;gap:2px}.proj-cell+.proj-cell{border-left:1px solid var(--line)}.proj-cell small{font:600 10.5px 'IBM Plex Mono';letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.proj-cell b{font:600 24px 'Fraunces';color:var(--money)}.proj-cell span{font-size:12px;color:var(--muted)}.finding{padding:22px 0;border-top:1px solid var(--line)}.finding-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}.callout{margin:18px 0;padding:12px 14px;border-radius:4px;background:#F3F4F6;color:var(--soft);border-left:3px solid #9CA3AF}.callout.warn{background:var(--amber-bg);border-color:var(--amber);color:#7A4B0D}.callout.good{background:var(--money-bg);border-color:var(--money);color:#234B39}.callout.info{background:#EFF6FF;border-color:#3B82F6;color:#1F3B63}ol,ul{margin:0 0 16px 22px;color:var(--soft)}li{margin:6px 0}.doc-foot{border-top:2px solid var(--line-strong);margin-top:8px;padding:22px 0 0;display:flex;justify-content:space-between;gap:20px;font-size:12px;color:var(--muted);flex-wrap:wrap}.doc-foot b{color:var(--ink)}@media(max-width:760px){.pad{padding:0 24px}.sheet{margin:0}.masthead{padding:36px 24px}.mast-grid{grid-template-columns:1fr}.keystrip{grid-template-columns:repeat(2,1fr)}.kcell:nth-child(3){border-left:none}.projection{grid-template-columns:1fr}.proj-cell+.proj-cell{border-left:none;border-top:1px solid var(--line)}}@media print{body{background:#fff}.sheet{margin:0;box-shadow:none;border:none;max-width:100%}h2,h3{break-after:avoid}table,svg,.verdict,.projection,.finding{break-inside:avoid}.masthead:after{display:none}}`;
+export const premiumReportStyles = `.brand-logo{max-height:48px;max-width:180px;object-fit:contain;display:block}:root{--ink:#f5f3fb;--soft:#c2bcd9;--muted:#8d86ab;--faint:#6e6790;--line:rgba(255,255,255,.08);--line-strong:rgba(255,255,255,.30);--brand:#a994ff;--brand-deep:#0f0a1a;--money:#2ecfb3;--money-bg:rgba(46,207,179,.10);--amber:#f5b942;--amber-fill:#D29A4A;--amber-bg:rgba(245,185,66,.12);--red:#ff6b6b;--red-bg:rgba(255,107,107,.12);--paper:#16102a;--paper-tint:#0b0712}*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',system-ui,sans-serif;color:var(--ink);background:var(--paper-tint);font-size:15px;line-height:1.7;-webkit-font-smoothing:antialiased}.sheet{max-width:820px;margin:40px auto;background:var(--paper);box-shadow:0 1px 2px rgba(22,33,27,.05),0 12px 40px rgba(22,33,27,.07);border:1px solid var(--line)}.pad{padding:0 72px}.masthead{background:var(--brand-deep);color:#fff;padding:48px 72px 44px;position:relative;overflow:hidden}.masthead:after{content:'';position:absolute;right:-80px;top:-80px;width:340px;height:340px;border-radius:50%;border:1px solid rgba(255,255,255,.10);box-shadow:0 0 0 48px rgba(255,255,255,.04),0 0 0 110px rgba(255,255,255,.03)}.mast-brand{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:40px;position:relative;z-index:1}.logo{font:600 15px 'Inter';letter-spacing:.02em}.doc-type{font:600 11px 'IBM Plex Mono';letter-spacing:.14em;text-transform:uppercase;color:#A79BE8}.mast-grid{display:grid;grid-template-columns:1fr auto;gap:40px;align-items:end;position:relative;z-index:1}.mast-title h1{font:600 34px/1.18 'Fraunces',serif;letter-spacing:-.015em;margin-bottom:18px}.mast-sub{font-size:14px;color:#C3BCE0;max-width:430px}.gauge{text-align:center}.gauge svg{display:block;margin:0 auto 4px}.g-num{font:700 38px/1 'Fraunces';fill:#fff}.g-of{font:500 11px 'IBM Plex Mono';fill:#A79BE8}.g-band{display:inline-block;font:600 11px 'Inter';letter-spacing:.06em;text-transform:uppercase;padding:4px 14px;border-radius:99px;background:rgba(234,255,0,.12);color:#EAFF00;border:1px solid rgba(234,255,0,.3)}.mast-meta{display:flex;flex-wrap:wrap;gap:8px 36px;margin-top:36px;padding-top:22px;border-top:1px solid rgba(255,255,255,.14);font-size:12.5px;color:#A79BE8;position:relative;z-index:1}.mast-meta b{color:#fff;font-weight:600;margin-left:6px}.keystrip{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line)}.kcell{padding:26px 20px 22px;text-align:center}.kcell+.kcell{border-left:1px solid var(--line)}.kcell b{display:block;font:600 26px 'Fraunces';letter-spacing:-.01em}.kcell b.good,.highlight{color:var(--money)}.kcell b.warn{color:var(--amber)}.kcell span{font-size:11.5px;color:var(--muted);font-weight:500;letter-spacing:.02em}.body-wrap{padding-top:56px;padding-bottom:72px}.eyebrow{font:600 11px 'IBM Plex Mono';letter-spacing:.16em;text-transform:uppercase;color:var(--brand);margin-bottom:10px}h2{font:600 24px/1.25 'Fraunces',serif;letter-spacing:-.01em;margin:0 0 16px}.section{margin-bottom:64px}.section-rule{display:flex;align-items:center;gap:14px;margin-bottom:28px}.section-rule .no{font:600 13px 'IBM Plex Mono';color:var(--faint)}.section-rule .ln{flex:1;height:1px;background:var(--line)}h3{font:600 17px 'Fraunces',serif;margin:20px 0 10px}p{margin:0 0 15px;color:var(--soft)}p b,li b{color:var(--ink);font-weight:600}.small{font-size:12.5px;color:var(--muted)}.mono{font-family:'IBM Plex Mono',monospace;font-size:.9em}.verdict{margin:8px 0 30px;padding:26px 30px;background:var(--money-bg);border-radius:4px;border-left:4px solid var(--money)}.verdict p{font:500 18px/1.55 'Fraunces',serif;color:var(--ink);margin:0}table{width:100%;border-collapse:collapse;margin:18px 0 10px;font-size:13.5px}th{text-align:left;font:600 11px 'Inter';text-transform:uppercase;letter-spacing:.08em;color:var(--muted);border-bottom:2px solid var(--line-strong);padding:9px 14px 9px 0}td{border-bottom:1px solid var(--line);padding:12px 14px 12px 0;vertical-align:top;color:var(--soft)}tr:last-child td{border-bottom:2px solid var(--line-strong)}td.num,th.num{text-align:right;font:500 12.5px 'IBM Plex Mono';white-space:nowrap}.tnote{font-size:12px;color:var(--muted);margin-bottom:24px}.tag{display:inline-block;font:600 10.5px 'Inter';letter-spacing:.04em;padding:2px 9px;border-radius:99px;background:var(--amber-bg);color:var(--amber)}.tag.sev-critical{background:var(--red-bg);color:var(--red)}.tag.sev-high{background:rgba(255,140,90,.14);color:#ff9d6b}.tag.sev-low{background:rgba(255,255,255,.08);color:#c2bcd9}.chart{margin:26px 0 12px}.chart svg{display:block;width:100%;height:auto}.chart-cap{font-size:12px;color:var(--muted);margin-bottom:22px}.bl{font:500 12.5px 'Inter';fill:var(--soft)}.bv{font:600 12px 'IBM Plex Mono';fill:var(--ink)}.bvw{font:600 12px 'IBM Plex Mono';fill:#fff}.grid{stroke:rgba(255,255,255,.07);stroke-width:1}.ax{stroke:var(--ink);stroke-width:1.5}.projection{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;margin:26px 0 8px;border-top:2px solid var(--line-strong);border-bottom:2px solid var(--line-strong)}.proj-cell{padding:20px 22px;display:flex;flex-direction:column;gap:2px}.proj-cell+.proj-cell{border-left:1px solid var(--line)}.proj-cell small{font:600 10.5px 'IBM Plex Mono';letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}.proj-cell b{font:600 24px 'Fraunces';color:var(--money)}.proj-cell span{font-size:12px;color:var(--muted)}.finding{padding:22px 0;border-top:1px solid var(--line)}.finding-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}.callout{margin:18px 0;padding:12px 14px;border-radius:4px;background:rgba(255,255,255,.05);color:var(--soft);border-left:3px solid #8d86ab}.callout.warn{background:var(--amber-bg);border-color:var(--amber);color:#f0c675}.callout.good{background:var(--money-bg);border-color:var(--money);color:#7fe0cd}.callout.info{background:rgba(96,140,255,.10);border-color:#7ba1ff;color:#a9c3ff}ol,ul{margin:0 0 16px 22px;color:var(--soft)}li{margin:6px 0}.doc-foot{border-top:2px solid var(--line-strong);margin-top:8px;padding:22px 0 0;display:flex;justify-content:space-between;gap:20px;font-size:12px;color:var(--muted);flex-wrap:wrap}.doc-foot b{color:var(--ink)}@media(max-width:760px){.pad{padding:0 24px}.sheet{margin:0}.masthead{padding:36px 24px}.mast-grid{grid-template-columns:1fr}.keystrip{grid-template-columns:repeat(2,1fr)}.kcell:nth-child(3){border-left:none}.projection{grid-template-columns:1fr}.proj-cell+.proj-cell{border-left:none;border-top:1px solid var(--line)}}@media print{body{background:#0b0712}.sheet{margin:0;box-shadow:none;border:none;max-width:100%}h2,h3{break-after:avoid}table,svg,.verdict,.projection,.finding{break-inside:avoid}.masthead:after{display:none}}`;
 
-const embeddedReportOverrides = `html,body{width:100%;max-width:100%;overflow-x:hidden}body{background:#f7f4ef}.sheet{width:calc(100% - 56px);max-width:1160px;margin:28px auto 64px;border:1px solid #E3DED4;border-radius:18px;box-shadow:0 18px 60px rgba(22,33,27,.08);overflow:hidden}.pad{padding-left:clamp(28px,5vw,72px);padding-right:clamp(28px,5vw,72px)}.masthead{padding:42px clamp(28px,5vw,72px) 38px}.masthead:after{right:-130px;top:-120px;opacity:.65}.mast-grid{grid-template-columns:minmax(0,1fr) 180px;align-items:center;gap:36px}.mast-title h1{max-width:760px;font-size:clamp(30px,4vw,46px);line-height:1.08;letter-spacing:0}.mast-sub{max-width:640px;font-size:15px;line-height:1.65}.mast-title,.mast-title h1,.mast-sub,p,h1,h2,h3,li,td,th{overflow-wrap:break-word;word-break:normal}.mast-meta{gap:10px 28px}.keystrip{grid-template-columns:repeat(4,minmax(0,1fr));background:#fff}.kcell{min-width:0;padding:24px 18px}.kcell b{font-size:clamp(22px,2.6vw,30px);overflow-wrap:break-word}.body-wrap{padding-top:54px}.section{margin-bottom:72px}.section-rule{margin-bottom:22px}.verdict{padding:24px 26px;border-radius:10px}.verdict p{font-size:clamp(18px,2vw,22px);line-height:1.55}table{table-layout:auto;max-width:100%;font-size:13px}td,th{overflow-wrap:break-word;word-break:normal}td.num,th.num{white-space:normal;text-align:right;min-width:112px}.chart{max-width:100%;overflow:hidden;border:1px solid #ECE8DE;border-radius:14px;background:#fff;padding:18px 18px 8px;margin:24px 0 14px}.chart svg{max-width:100%;height:auto}.chart-cap{padding:0 4px}.finding{border:1px solid #ECE8DE;border-radius:14px;background:#fff;padding:22px 24px;margin:18px 0;box-shadow:0 8px 24px rgba(22,33,27,.035)}.finding:first-of-type{border-color:#D9B16D}.finding h3{font-size:21px}.callout{border-radius:10px}.projection{border:1px solid #E3DED4;border-radius:14px;overflow:hidden}.proj-cell+.proj-cell{border-left:1px solid #E3DED4}@media(max-width:900px){.sheet{width:calc(100% - 28px);margin:14px auto 40px;border-radius:12px}.mast-grid{grid-template-columns:1fr}.gauge{text-align:left}.gauge svg{margin-left:0}.keystrip{grid-template-columns:repeat(2,minmax(0,1fr))}.kcell:nth-child(3){border-left:none}.mast-meta{display:grid;grid-template-columns:1fr}.pad{padding-left:22px;padding-right:22px}.masthead{padding-left:22px;padding-right:22px}td.num,th.num{text-align:left}.projection{grid-template-columns:1fr}.proj-cell+.proj-cell{border-left:none;border-top:1px solid #E3DED4}}@media(max-width:640px){.keystrip{grid-template-columns:1fr}.kcell+.kcell{border-left:none;border-top:1px solid var(--line)}table,thead,tbody,tr,td,th{display:block;width:100%}thead{display:none}td{padding:10px 0}tr{padding:12px 0;border-bottom:1px solid var(--line)}tr:last-child td{border-bottom:0}}`;
+const embeddedReportOverrides = `html,body{width:100%;max-width:100%;overflow-x:hidden}body{background:#0b0712}.sheet{width:calc(100% - 56px);max-width:1160px;margin:28px auto 64px;border:1px solid rgba(255,255,255,.10);border-radius:18px;box-shadow:0 18px 60px rgba(22,33,27,.08);overflow:hidden}.pad{padding-left:clamp(28px,5vw,72px);padding-right:clamp(28px,5vw,72px)}.masthead{padding:42px clamp(28px,5vw,72px) 38px}.masthead:after{right:-130px;top:-120px;opacity:.65}.mast-grid{grid-template-columns:minmax(0,1fr) 180px;align-items:center;gap:36px}.mast-title h1{max-width:760px;font-size:clamp(30px,4vw,46px);line-height:1.08;letter-spacing:0}.mast-sub{max-width:640px;font-size:15px;line-height:1.65}.mast-title,.mast-title h1,.mast-sub,p,h1,h2,h3,li,td,th{overflow-wrap:break-word;word-break:normal}.mast-meta{gap:10px 28px}.keystrip{grid-template-columns:repeat(4,minmax(0,1fr));background:#16102a}.kcell{min-width:0;padding:24px 18px}.kcell b{font-size:clamp(22px,2.6vw,30px);overflow-wrap:break-word}.body-wrap{padding-top:54px}.section{margin-bottom:72px}.section-rule{margin-bottom:22px}.verdict{padding:24px 26px;border-radius:10px}.verdict p{font-size:clamp(18px,2vw,22px);line-height:1.55}table{table-layout:auto;max-width:100%;font-size:13px}td,th{overflow-wrap:break-word;word-break:normal}td.num,th.num{white-space:normal;text-align:right;min-width:112px}.chart{max-width:100%;overflow:hidden;border:1px solid rgba(255,255,255,.10);border-radius:14px;background:#1c1633;padding:18px 18px 8px;margin:24px 0 14px}.chart svg{max-width:100%;height:auto}.chart-cap{padding:0 4px}.finding{border:1px solid rgba(255,255,255,.10);border-radius:14px;background:#1c1633;padding:22px 24px;margin:18px 0;box-shadow:0 8px 24px rgba(22,33,27,.035)}.finding:first-of-type{border-color:#B9A8F7}.finding h3{font-size:21px}.callout{border-radius:10px}.projection{border:1px solid rgba(255,255,255,.10);border-radius:14px;overflow:hidden}.proj-cell+.proj-cell{border-left:1px solid rgba(255,255,255,.10)}@media(max-width:900px){.sheet{width:calc(100% - 28px);margin:14px auto 40px;border-radius:12px}.mast-grid{grid-template-columns:1fr}.gauge{text-align:left}.gauge svg{margin-left:0}.keystrip{grid-template-columns:repeat(2,minmax(0,1fr))}.kcell:nth-child(3){border-left:none}.mast-meta{display:grid;grid-template-columns:1fr}.pad{padding-left:22px;padding-right:22px}.masthead{padding-left:22px;padding-right:22px}td.num,th.num{text-align:left}.projection{grid-template-columns:1fr}.proj-cell+.proj-cell{border-left:none;border-top:1px solid rgba(255,255,255,.10)}}@media(max-width:640px){.keystrip{grid-template-columns:1fr}.kcell+.kcell{border-left:none;border-top:1px solid var(--line)}table,thead,tbody,tr,td,th{display:block;width:100%}thead{display:none}td{padding:10px 0}tr{padding:12px 0;border-bottom:1px solid var(--line)}tr:last-child td{border-bottom:0}}`;
 
-const premiumPolishOverrides = `.status-pill{display:inline-block;font:600 10.5px 'Inter';letter-spacing:.03em;padding:2px 10px;border-radius:99px;white-space:nowrap}.status-good{background:var(--money-bg);color:var(--money)}.status-warn{background:var(--amber-bg);color:var(--amber)}.status-bad{background:var(--red-bg);color:var(--red)}.status-neutral{color:var(--faint)}.scorecard td:first-child{color:var(--ink);font-weight:500}.roadmap{margin:18px 0 8px}.phase{border:1px solid #ECE8DE;border-left:3px solid var(--brand);border-radius:10px;padding:16px 22px;margin:14px 0;background:#fff;break-inside:avoid}.phase-head{display:flex;align-items:baseline;gap:12px;margin-bottom:8px}.phase-no{font:600 15px 'Fraunces',serif;color:var(--ink)}.phase-time{font:600 10.5px 'IBM Plex Mono';letter-spacing:.1em;text-transform:uppercase;color:var(--brand)}.phase-goal{margin:0 0 10px;color:var(--soft)}.phase ol{margin:0 0 2px 20px}.phase-result{color:var(--money);font-weight:600;font-size:.9em;white-space:nowrap}.phase-effort{display:inline-block;font:600 10px 'IBM Plex Mono';letter-spacing:.04em;text-transform:uppercase;color:var(--muted);background:#F3F4F6;border-radius:4px;padding:1px 7px;margin-left:4px}.section{margin-bottom:82px}.eyebrow{color:var(--muted)}.num{font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}p .num,.verdict .num,.mast-sub .num{font-weight:700;color:var(--money)}.score-gauge-card{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:24px;border:1px solid #ECE8DE;border-radius:14px;background:#fff;padding:20px 22px;margin:24px 0}.score-gauge-card .g-num{fill:var(--ink)}.score-gauge-card .g-of{fill:var(--muted)}.score-gauge-card .gauge path:first-child{stroke:#E8EAE4}.score-gauge-card .small{margin:0}.finding{position:relative;padding-left:30px}.finding:before{content:'';position:absolute;left:16px;top:24px;width:3px;height:34px;border-radius:99px;background:#9CA3AF}.finding.sev-critical:before{background:var(--red)}.finding.sev-high:before{background:#C2410C}.finding.sev-medium:before{background:var(--amber)}.finding.sev-low:before{background:#9CA3AF}.finding-head{flex-wrap:wrap;color:var(--muted)}.finding-head .mono{color:var(--muted);font-size:11px;letter-spacing:.02em}.takeaway{font:500 17px/1.55 'Fraunces',serif;color:var(--ink);border-left:3px solid var(--money);padding-left:14px;margin:20px 0 18px}.evidence-table td.num{max-width:190px}.method{margin-top:36px}.toc-list{margin:20px 0 4px;border-top:2px solid var(--line-strong)}.toc-row{display:flex;align-items:baseline;gap:16px;padding:14px 2px;border-bottom:1px solid var(--line);text-decoration:none;color:var(--ink)}.toc-no{flex:0 0 auto;min-width:30px;font:600 12px 'IBM Plex Mono';letter-spacing:.04em;color:var(--brand)}.toc-text{flex:1 1 auto;display:flex;flex-direction:column;gap:2px}.toc-label{font:500 15.5px 'Fraunces',serif;letter-spacing:-.005em;color:var(--ink)}.toc-sub{font-size:12.5px;color:var(--muted)}.toc-row:hover .toc-label{color:var(--brand)}.toc{break-after:page}@media(max-width:640px){.score-gauge-card{grid-template-columns:1fr}.finding{padding-left:24px}.finding:before{left:12px}.toc-no{min-width:26px}}`;
+const premiumPolishOverrides = `.status-pill{display:inline-block;font:600 10.5px 'Inter';letter-spacing:.03em;padding:2px 10px;border-radius:99px;white-space:nowrap}.status-good{background:var(--money-bg);color:var(--money)}.status-warn{background:var(--amber-bg);color:var(--amber)}.status-bad{background:var(--red-bg);color:var(--red)}.status-neutral{color:var(--faint)}.scorecard td:first-child{color:var(--ink);font-weight:500}.roadmap{margin:18px 0 8px}.phase{border:1px solid rgba(255,255,255,.10);border-left:3px solid var(--brand);border-radius:10px;padding:16px 22px;margin:14px 0;background:#1c1633;break-inside:avoid}.phase-head{display:flex;align-items:baseline;gap:12px;margin-bottom:8px}.phase-no{font:600 15px 'Fraunces',serif;color:var(--ink)}.phase-time{font:600 10.5px 'IBM Plex Mono';letter-spacing:.1em;text-transform:uppercase;color:var(--brand)}.phase-goal{margin:0 0 10px;color:var(--soft)}.phase ol{margin:0 0 2px 20px}.phase-result{color:var(--money);font-weight:600;font-size:.9em;white-space:nowrap}.phase-effort{display:inline-block;font:600 10px 'IBM Plex Mono';letter-spacing:.04em;text-transform:uppercase;color:var(--muted);background:rgba(255,255,255,.08);border-radius:4px;padding:1px 7px;margin-left:4px}.section{margin-bottom:82px}.eyebrow{color:var(--muted)}.num{font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}p .num,.verdict .num,.mast-sub .num{font-weight:700;color:var(--money)}.score-gauge-card{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:24px;border:1px solid rgba(255,255,255,.10);border-radius:14px;background:#1c1633;padding:20px 22px;margin:24px 0}.score-gauge-card .g-num{fill:var(--ink)}.score-gauge-card .g-of{fill:var(--muted)}.score-gauge-card .gauge path:first-child{stroke:rgba(255,255,255,.14)}.score-gauge-card .small{margin:0}.finding{position:relative;padding-left:30px}.finding:before{content:'';position:absolute;left:16px;top:24px;width:3px;height:34px;border-radius:99px;background:#9CA3AF}.finding.sev-critical:before{background:var(--red)}.finding.sev-high:before{background:#C2410C}.finding.sev-medium:before{background:var(--amber)}.finding.sev-low:before{background:#9CA3AF}.finding-head{flex-wrap:wrap;color:var(--muted)}.finding-head .mono{color:var(--muted);font-size:11px;letter-spacing:.02em}.takeaway{font:500 17px/1.55 'Fraunces',serif;color:var(--ink);border-left:3px solid var(--money);padding-left:14px;margin:20px 0 18px}.evidence-table td.num{max-width:190px}.method{margin-top:36px}.toc-list{margin:20px 0 4px;border-top:2px solid var(--line-strong)}.toc-row{display:flex;align-items:baseline;gap:16px;padding:14px 2px;border-bottom:1px solid var(--line);text-decoration:none;color:var(--ink)}.toc-no{flex:0 0 auto;min-width:30px;font:600 12px 'IBM Plex Mono';letter-spacing:.04em;color:var(--brand)}.toc-text{flex:1 1 auto;display:flex;flex-direction:column;gap:2px}.toc-label{font:500 15.5px 'Fraunces',serif;letter-spacing:-.005em;color:var(--ink)}.toc-sub{font-size:12.5px;color:var(--muted)}.toc-row:hover .toc-label{color:var(--brand)}.toc{break-after:page}@media(max-width:640px){.score-gauge-card{grid-template-columns:1fr}.finding{padding-left:24px}.finding:before{left:12px}.toc-no{min-width:26px}}`;
 
 // PDF export renders the same document but skips the "embedded" web overrides
 // (rounded card, drop shadow, large outer margins) which fight with print
 // pagination and leave large blank gaps between pages. Print rules already
 // defined in premiumReportStyles handle full-bleed layout for @media print.
-const pdfOverrides = `body{background:#fff;font-size:13.5px}.sheet{margin:0;max-width:100%;box-shadow:none;border:none}.pad{padding:0 40px}.masthead{padding:34px 40px 30px}.masthead:after{display:none}.mast-title h1{font-size:28px}.mast-grid{gap:28px}.body-wrap{padding-top:36px;padding-bottom:30px}.section{margin-bottom:38px}.keystrip{break-inside:avoid}`;
+const pdfOverrides = `body{background:#0b0712;font-size:13.5px}.sheet{margin:0;max-width:100%;box-shadow:none;border:none}.pad{padding:0 40px}.masthead{padding:34px 40px 30px}.masthead:after{display:none}.mast-title h1{font-size:28px}.mast-grid{gap:28px}.body-wrap{padding-top:36px;padding-bottom:30px}.section{margin-bottom:38px}.keystrip{break-inside:avoid}`;
 
 const docFootHtml = (branding = {}) => {
   const name = escapeHtml(branding.companyName || "AdAdviser");

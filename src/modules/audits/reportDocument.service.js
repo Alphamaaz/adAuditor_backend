@@ -97,6 +97,84 @@ const findingRecoverable = (finding) => {
   return moneyMagnitude(finding?.estimatedImpact || finding?.evidence);
 };
 
+// ── Money-coherence display layer ─────────────────────────────────────────────
+// A finding's prose is authored by the engine BEFORE overlap/cap reconciliation,
+// so its money figure can be the GROSS measured amount (PKR 14,440) while the
+// trust layer later assigns a smaller reconciled net (PKR 12,111). Quoting the
+// stale gross on the cover next to the reconciled net in the table is the "two
+// unlabeled numbers that answer the same question" bug. By engine convention the
+// FIRST currency token in `estimatedImpact` IS the finding's recoverable amount,
+// so it is safe to swap exactly that token — and only when the token matches the
+// finding's own gross figure, so a CPA/target/spend that happens to lead a title
+// is never touched.
+const moneyTokenRegex = (currency) =>
+  new RegExp(`(?:${String(currency || "USD").toUpperCase()}|\\$|€|£)\\s?\\d[\\d,]*(?:\\.\\d+)?`);
+
+const netAdjustedText = (text, finding, currency = "USD") => {
+  const original = String(text ?? "");
+  if (!original) return original;
+  const net = finding?.evidence?.netRecoverable;
+  if (!Number.isFinite(net) || net <= 0) return original;
+  if (
+    isDiagnostic(finding) ||
+    finding?.evidence?.advisory === true ||
+    finding?.evidence?.blocksDelivery === true
+  ) {
+    return original;
+  }
+  const gross = moneyMagnitude(finding?.estimatedImpact);
+  if (!(gross > 0) || Math.abs(gross - net) / net <= 0.02) return original;
+  const re = moneyTokenRegex(currency);
+  const match = original.match(re);
+  if (!match) return original;
+  const tokenValue = parseMoney(match[0]);
+  if (!(tokenValue > 0) || Math.abs(tokenValue - gross) / gross > 0.02) return original;
+  return original.replace(re, formatMoney(net, currency));
+};
+
+// Campaign names like "Display | PK | Signals | Tightened | 6/8" buried inside a
+// dense sentence are unreadable — bold every known campaign name so it is
+// instantly identifiable. Longest-first with token substitution so a name that is
+// a substring of another name can't corrupt an already-wrapped match; quoted
+// occurrences ("Name") collapse to the bold form without the quotes.
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const emphasizeCampaignNames = (text, names) => {
+  const original = String(text ?? "");
+  if (!original || !names?.length) return original;
+  let out = original;
+  const sorted = [...new Set(names)]
+    .filter((n) => typeof n === "string" && n.trim().length >= 4)
+    .sort((a, b) => b.length - a.length);
+  const tokens = [];
+  sorted.forEach((name, i) => {
+    const token = `\u0000N${i}\u0000`;
+    const re = new RegExp(`"${escapeRegExp(name)}"|${escapeRegExp(name)}`, "g");
+    if (re.test(out)) {
+      out = out.replace(re, token);
+      tokens.push([token, `**${name}**`]);
+    }
+  });
+  for (const [token, bold] of tokens) out = out.split(token).join(bold);
+  return out;
+};
+
+// Collect every campaign name in the dataset (spending + structure-only) for
+// name emphasis in finding prose.
+const collectCampaignNames = (audit) => {
+  const names = new Set();
+  const platforms = audit?.normalizedDataset?.data?.platforms || {};
+  for (const platform of Object.values(platforms)) {
+    for (const level of ["campaign", "campaignStructureOnly"]) {
+      for (const c of platform?.byLevel?.[level] || []) {
+        const name = typeof c?.name === "string" ? c.name.trim() : "";
+        if (name.length >= 4) names.add(name);
+      }
+    }
+  }
+  return [...names];
+};
+
 const formatMoney = (value, currency = "USD") => {
   const rounded = Math.round(num(value));
   const formatted = rounded.toLocaleString("en-US");
@@ -127,6 +205,21 @@ const impactLabel = (finding, currency = "USD") => {
   }
   const text = String(finding.estimatedImpact || "").trim();
   const context = `${finding.title || ""} ${finding.detail || ""} ${text}`;
+  // Prefer a specific fact from the evidence over a vague bucket word — "102%
+  // over its target" reads like a verdict; "Optimization" reads like filler.
+  const ev = finding.evidence || {};
+  if (Number.isFinite(ev.percentOverTarget) && ev.percentOverTarget > 0) {
+    return `${Math.round(ev.percentOverTarget)}% over target`;
+  }
+  const segCpa = Number(ev.segmentCpa);
+  const baseCpa = Number(ev.baselineCpa);
+  if (Number.isFinite(segCpa) && Number.isFinite(baseCpa) && baseCpa > 0 && segCpa > baseCpa) {
+    const pct = Math.round(((segCpa - baseCpa) / baseCpa) * 100);
+    if (pct >= 10) return `${pct}% over ${/target/i.test(context) ? "target" : "baseline"}`;
+  }
+  if (Number.isFinite(ev.deadCampaignCount) && ev.deadCampaignCount > 0) {
+    return `${ev.deadCampaignCount} idle campaigns`;
+  }
   if (/not quantified|impact not quantifiable|not safely quantifiable/i.test(text)) {
     if (/paused|inactive|zero impression|keyword/i.test(context)) return "Account hygiene risk";
     if (/brand/i.test(context)) return "Brand risk";
@@ -148,7 +241,9 @@ const impactLabel = (finding, currency = "USD") => {
 
 const titleize = (value) =>
   String(value ?? "")
-    .replace(/[_-]+/g, " ")
+    // Underscores are key debris; hyphens are legitimate prose ("re-enable",
+    // "post-click", "-100%") and must survive.
+    .replace(/_+/g, " ")
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/\s+/g, " ")
     .trim()
@@ -166,7 +261,7 @@ const cleanReportText = (value) =>
     );
 
 const cleanSegmentValue = (value) => {
-  const text = String(value ?? "").replace(/[_-]+/g, " ").trim();
+  const text = String(value ?? "").replace(/_+/g, " ").trim();
   if (/^[A-Z][A-Z\s]+$/.test(text)) return text.toLowerCase().replace(/^./, (c) => c.toUpperCase());
   return cleanReportText(text);
 };
@@ -364,25 +459,43 @@ export const sortFindingsForReport = (findings = []) =>
 const categoryScoreRows = (audit) => {
   const scores = audit.categoryScores || {};
   const rows = [];
-  const walk = (value, path = []) => {
+  // categoryMeta (written by the engine next to `categories`) carries each
+  // category's basis: how many findings produced the score, and whether the
+  // account has data the category could be scored on at all. A category that is
+  // not applicable (e.g. "Keyword Strategy" on a Display-only account with no
+  // keyword targeting) is dropped rather than shown with an unexplained number.
+  const walk = (value, path = [], metaByCategory = null) => {
     if (typeof value === "number" && value >= 0 && value <= 100) {
       const last = path[path.length - 1];
       if (/^(overall|score|findingCount)$/i.test(last || "")) return;
       const categoryIndex = path.findIndex((p) => p === "categories");
       const labelPath = categoryIndex >= 0 ? path.slice(categoryIndex + 1) : path;
       const label = labelPath.join(" ");
-      rows.push({ label: label || "Score", value });
+      const meta = metaByCategory?.[last] || null;
+      if (meta && meta.applicable === false) return;
+      rows.push({ label: label || "Score", value, findingCount: meta?.findingCount ?? null });
       return;
     }
     if (!value || typeof value !== "object" || Array.isArray(value)) return;
-    Object.entries(value).forEach(([key, child]) => walk(child, [...path, key]));
+    const nextMeta =
+      value.categoryMeta && typeof value.categoryMeta === "object" ? value.categoryMeta : null;
+    Object.entries(value).forEach(([key, child]) => {
+      if (key === "categoryMeta") return;
+      walk(child, [...path, key], key === "categories" ? nextMeta || metaByCategory : metaByCategory);
+    });
   };
   walk(scores);
   return rows
     .filter((row) => row.label && !/^platforms$/i.test(row.label))
     .slice(0, 10)
-    .map(({ label, value }) => ({
-      label: cleanReportText(label),
+    .map(({ label, value, findingCount }) => ({
+      // The basis is part of the label so every score has a visible reason:
+      // "Bidding Strategy Alignment · 3 findings — 14" is explained; a bare
+      // "92" is not.
+      label:
+        findingCount != null
+          ? `${cleanReportText(label)} · ${findingCount === 0 ? "no findings" : `${findingCount} finding${findingCount === 1 ? "" : "s"}`}`
+          : cleanReportText(label),
       value,
       max: 100,
       tone: value < 85 ? "warn" : "brand",
@@ -390,11 +503,26 @@ const categoryScoreRows = (audit) => {
     }));
 };
 
-const hiddenEvidenceKeys = new Set(["id", "ruleId", "rule_id", "module", "version", "currency", "dimension"]);
+// netRecoverable is hidden because it duplicates the "Recoverable spend" row the
+// table already leads with; leadsSeverityBand/confidentlyBetter are internal
+// ranking flags, not client-facing evidence.
+const hiddenEvidenceKeys = new Set([
+  "id", "ruleId", "rule_id", "module", "version", "currency", "dimension",
+  "netRecoverable", "leadsSeverityBand", "confidentlyBetter",
+]);
 
 const evidenceValue = (key, value, currency) => {
   if (typeof value === "number" && Number.isFinite(value)) {
+    // CVR/CTR evidence is stored as a percent number (bestCvr: 3.63 = 3.63%) —
+    // without this branch it fell through to Math.round and printed "4".
+    if (/c[vt]r/i.test(key)) return `${Number(value.toFixed(2)).toLocaleString("en-US")}%`;
+    if (/roas/i.test(key)) return `${Number(value.toFixed(2)).toLocaleString("en-US")}×`;
     if (/pct|percent|rate/i.test(key)) return `${Number(value.toFixed(1)).toLocaleString("en-US")}%`;
+    // A key naming a COUNT is never money even when it also contains a money
+    // word — "spendingAdSets: 11" must print "11", not "PKR 11".
+    if (/(count|number|sets|groups|campaigns|keywords|items|segments|days)/i.test(key)) {
+      return Math.round(value).toLocaleString("en-US");
+    }
     if (/(spend|waste|cost|cpa|cpc|budget|revenue|impact|recoverable)/i.test(key)) return formatMoney(value, currency);
     return Math.round(value).toLocaleString("en-US");
   }
@@ -664,24 +792,151 @@ const whyText = (finding) => {
   return null;
 };
 
-const findingBlock = (finding, currency = "USD") => {
-  const impact = finding.estimatedImpact || "Business risk identified; the available data does not support a reliable money estimate.";
+// ── Creative & copy recommendations ──────────────────────────────────────────
+// Data-grounded suggestions on ad copy, creative direction, and ad structure
+// (extensions/snippets). Every suggestion cites the account data that motivates
+// it — no generic "write better ads" filler; when the account gives no creative
+// signal, the section doesn't render.
+const creativeSection = (audit, findings, currency) => {
+  // Only ads that actually spent — a rating on a zero-spend ad is not evidence,
+  // and counting them would contradict the ad-strength finding's own numbers.
+  const ads = recordsAtLevel(audit, "ad").filter((a) => a && num(a.spend) > 0);
+  const assets = recordsAtLevel(audit, "asset");
+  const platform = audit.selectedPlatforms?.[0] || "GOOGLE";
+  const network = platform === "GOOGLE" ? resolveGoogleNetwork(audit.normalizedDataset) : null;
+
+  const recommendations = [];
+
+  // 1) Weak Ad Strength — concrete rewrite guidance tied to the rated ads.
+  const weakAds = ads.filter((a) => /poor|average/i.test(String(a.adStrength || "")));
+  if (weakAds.length) {
+    const weakSpend = weakAds.reduce((s, a) => s + num(a.spend), 0);
+    const activeCount = ads.length;
+    recommendations.push([
+      "Ad copy",
+      `Rework the ${weakAds.length} ad${weakAds.length === 1 ? "" : "s"} rated below "Good": add more unique headlines (aim for 10+), include the audience's market/language in at least 2 headlines, vary the call-to-action, and unpin headlines so the platform can rotate combinations.`,
+      `${weakAds.length} of ${activeCount} ads rated ${[...new Set(weakAds.map((a) => cleanReportText(String(a.adStrength).toLowerCase())))].join("/")} on ${formatMoney(weakSpend, currency)} of spend`,
+    ]);
+  }
+
+  // 1b) Meta: thin creative rotation + default ad names. With 1–2 ads per
+  // campaign the delivery system has nothing to rotate to when the audience
+  // fatigues — frequency climbs with no in-campaign relief valve.
+  if (platform === "META" && ads.length >= 2) {
+    const byCampaign = new Map();
+    for (const a of ads) {
+      const key = a.campaignName || "—";
+      byCampaign.set(key, (byCampaign.get(key) || 0) + 1);
+    }
+    const thin = [...byCampaign.entries()].filter(([, n]) => n <= 2);
+    if (byCampaign.size >= 2 && thin.length >= Math.ceil(byCampaign.size / 2)) {
+      recommendations.push([
+        "Creative diversity",
+        "Run 3–5 ad variants per campaign (different hooks/first lines, at least one video and one static). With only 1–2 ads live, the delivery system has nothing to rotate to when the audience fatigues — frequency climbs and CPM rises with no in-campaign relief valve.",
+        `${thin.length} of ${byCampaign.size} spending campaigns run 2 or fewer ads`,
+      ]);
+    }
+    const genericAds = ads.filter((a) => {
+      const name = String(a.name || "").trim();
+      return /([–—-]\s*copy(\s*\d+)?)$/i.test(name) || /^new leads ad/i.test(name);
+    });
+    if (ads.length >= 3 && genericAds.length >= Math.ceil(ads.length / 2)) {
+      recommendations.push([
+        "Ad naming",
+        'Name ads by their creative angle (hook | format | date) instead of "– Copy 2". Without it the winning creative cannot be identified at a glance, and the learning is lost when a campaign is archived.',
+        `${genericAds.length} of ${ads.length} spending ads use default/copy names`,
+      ]);
+    }
+  }
+
+  // 2) Missing extensions — Search inventory only (extensions don't serve on
+  // pure Display), and only when asset data confirms the gap.
+  if (platform === "GOOGLE" && network === "SEARCH") {
+    const presentTypes = new Set(assets.map((a) => String(a.fieldType || "").toUpperCase()));
+    const coreMissing = ["SITELINK", "CALLOUT", "STRUCTURED_SNIPPET"].filter((t) => !presentTypes.has(t));
+    if (coreMissing.length) {
+      recommendations.push([
+        "Ad structure",
+        `Add ${coreMissing.map((t) => cleanReportText(t.toLowerCase())).join(", ")} assets: at least 4 sitelinks (top pages/offers), 4 callouts (proof points), and 1–2 structured snippets. They expand the ad at no extra CPC and consistently lift CTR.`,
+        assets.length ? `No ${coreMissing.map((t) => t.toLowerCase()).join("/")} assets found in the account` : "No extension assets found in the account",
+      ]);
+    }
+  }
+
+  // 3) Downstream funnel diagnosis → message-match copy work. Grounded in the
+  // engine's own post-click findings rather than re-deriving here.
+  const postClick = findings.find((f) => /post.click|landing page|downstream/i.test(`${f.title} ${f.detail || ""}`));
+  if (postClick) {
+    recommendations.push([
+      "Message match",
+      "Align the ad's promise with the landing page's first screen: the headline the user clicked should be repeated (or directly answered) above the fold, with one visible call-to-action that matches the ad's offer. Test this before spending more on new creative.",
+      `Engine finding: ${postClick.title}`,
+    ]);
+  }
+
+  // 4) CTR below benchmark → creative refresh with the measured gap as basis.
+  const ctrFinding = findings.find((f) => f.ruleId === "BENCH-CTR-001" && f.evidence?.actualCtr != null && f.evidence?.benchmarkCtr != null);
+  if (ctrFinding) {
+    recommendations.push([
+      "Creative refresh",
+      "Refresh the weakest creative first: replace the lowest-CTR ad in each ad group with a new variant (new hook in the first line, human faces or product-in-use imagery, and a single clear CTA).",
+      `Account CTR ${ctrFinding.evidence.actualCtr}% vs ${ctrFinding.evidence.benchmarkCtr}% benchmark`,
+    ]);
+  }
+
+  // 5) Display/PMax inventory → responsive asset coverage.
+  if (platform === "GOOGLE" && (network === "DISPLAY" || network === "PMAX") && ads.length) {
+    recommendations.push([
+      "Creative coverage",
+      "Supply the full responsive asset set: landscape + square + portrait images, logos, and both short and long headlines/descriptions, so the network can serve every placement size instead of auto-cropping or skipping inventory.",
+      `Account serves on the ${network === "PMAX" ? "Performance Max" : "Display"} network (${ads.length} active ad${ads.length === 1 ? "" : "s"})`,
+    ]);
+  }
+
+  if (!recommendations.length) return null;
+
+  return {
+    id: "creative-copy",
+    eyebrow: "Creative & copy",
+    title: "Ad copy and creative recommendations",
+    intro: "Suggestions for copy, creative direction, and ad structure — each grounded in what this account's own data shows is weak or missing.",
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Area", align: "left", width: "110px" },
+          { header: "Recommendation", align: "left" },
+          { header: "Based on", align: "left", width: "200px" },
+        ],
+        currency,
+        rows: recommendations.slice(0, 5),
+        footnote: "Creative work compounds with the money fixes above — ship the recoverable-spend fixes first, then iterate creative on the surviving campaigns.",
+      },
+    ],
+  };
+};
+
+const findingBlock = (finding, currency = "USD", campaignNames = []) => {
+  // Every money figure a client sees must be the reconciled net — the engine's
+  // prose is rewritten where its gross figure diverges (see netAdjustedText).
+  const impact = netAdjustedText(finding.estimatedImpact, finding, currency) || "Business risk identified; the available data does not support a reliable money estimate.";
+  const emphasize = (text) => emphasizeCampaignNames(text, campaignNames);
   const proseContext = `${finding.detail || finding.title} ${impact}`;
   const bodyBlocks = [
     {
       type: "paragraph",
-      text: `**What is happening:** ${finding.detail || finding.title}`,
+      text: `**What is happening:** ${emphasize(finding.detail || finding.title)}`,
     },
   ];
   // "Why it is happening" only when the rule actually diagnosed a cause — no
   // generic hedge repeated on every finding.
   const why = whyText(finding);
   if (why) {
-    bodyBlocks.push({ type: "paragraph", text: `**Why it is happening:** ${why}` });
+    bodyBlocks.push({ type: "paragraph", text: `**Why it is happening:** ${emphasize(why)}` });
   }
   bodyBlocks.push({
     type: "paragraph",
-    text: `**Estimated business impact:** ${impact}`,
+    text: `**Estimated business impact:** ${emphasize(impact)}`,
   });
   const chart = chartForFinding(finding, currency);
   if (chart) {
@@ -717,7 +972,7 @@ const findingBlock = (finding, currency = "USD") => {
     type: "finding",
     id: null,
     severity: finding.severity,
-    headline: finding.title,
+    headline: netAdjustedText(finding.title, finding, currency),
     confidence: findingConfidence(finding),
     ease: findingEase(finding),
     body_blocks: bodyBlocks,
@@ -795,7 +1050,12 @@ const accountScorecardSection = (audit, currency, totals) => {
   if (ctr != null && ctrBench) {
     let status = "bad";
     let label = "Below benchmark";
-    if (ctr >= ctrBench.good) { status = "good"; label = "Strong"; }
+    if (ctr >= ctrBench.good) {
+      status = "good";
+      // Quantify HOW strong — "17× benchmark" is a verdict, "Strong" is a shrug.
+      const mult = ctrBench.warning > 0 ? ctr / ctrBench.warning : null;
+      label = mult != null && mult >= 3 ? `Strong — ${Math.round(mult)}× benchmark` : "Strong";
+    }
     else if (ctr >= ctrBench.warning) { status = "warn"; label = "Acceptable"; }
     rows.push({ metric: "Click-through rate", value: `${ctr.toFixed(2)}%`, target: `≥ ${ctrBench.warning}%`, status, statusLabel: label });
   } else if (ctr != null) {
@@ -826,6 +1086,26 @@ const accountScorecardSection = (audit, currency, totals) => {
   const anomalyNote = hasAnomaly
     ? " Cost per acquisition and click-through rate exclude the campaign whose conversions are too cheap to be genuine (see the tracking-integrity finding) — its fake clicks would otherwise understate the real cost and inflate CTR."
     : "";
+  // When the declared target sits far below anything any campaign has actually
+  // achieved, say so — scoring "236% over target" against a number the account
+  // has never seen reads harsher than the data supports.
+  let aspirationalNote = "";
+  if (declaredTargetCpa > 0 && cpa != null) {
+    let bestProvenCpa = null;
+    const platformsData = audit.normalizedDataset?.data?.platforms || {};
+    for (const p of Object.values(platformsData)) {
+      for (const c of p?.byLevel?.campaign || []) {
+        if (anomalyNames.has(normName(c.name))) continue;
+        const conv = num(c.results ?? c.conversions);
+        if (conv < 20) continue;
+        const campCpa = c.cpa != null ? num(c.cpa) : num(c.spend) / conv;
+        if (campCpa > 0 && (bestProvenCpa == null || campCpa < bestProvenCpa)) bestProvenCpa = campCpa;
+      }
+    }
+    if (bestProvenCpa != null && declaredTargetCpa < bestProvenCpa * 0.6) {
+      aspirationalNote = ` Note: no campaign has proven better than ${formatMoney(bestProvenCpa, currency)} per result on real volume — treat that as the near-term achievable bar; your ${formatMoney(declaredTargetCpa, currency)} target is aspirational.`;
+    }
+  }
   // Disclose where the benchmark business type came from so a wrong one is
   // visible and fixable: declared in the profile, or detected from the data.
   const btQualifier =
@@ -840,7 +1120,8 @@ const accountScorecardSection = (audit, currency, totals) => {
         ? `CPA target (${formatMoney(targetCpa, currency)}) inferred from your campaigns' own Target-CPA settings — set an account target in intake to score against your actual goal; CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}.`
         : `CPA target (${formatMoney(targetCpa, currency)}) from your intake; CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}.`
       : `CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}. Set a target CPA in intake to score CPA against it.`) +
-    anomalyNote;
+    anomalyNote +
+    aspirationalNote;
 
   return {
     id: "scorecard",
@@ -906,6 +1187,12 @@ const campaignVerdict = (c, baselineCpa, isAnomaly = false, comparable = true) =
   if (results > 0 && !comparable) {
     return "The only campaign of its conversion type — no comparable peer to judge its cost against. Track it against your own target, not the account average.";
   }
+  // A campaign missing its OWN Target-CPA setting by half or more is judged
+  // against that first — it's the goal the client already chose for it.
+  const ownTarget = num(c.targetCpa);
+  if (ownTarget > 0 && cpa && cpa >= ownTarget * 1.5) {
+    return `Paying ${(cpa / ownTarget).toFixed(1)}× its own Target-CPA setting — bring it back to its goal or stop funding it.`;
+  }
   if (baselineCpa && cpa && cpa >= baselineCpa * 2.5) {
     return `Converting at ${(cpa / baselineCpa).toFixed(1)}× the account average — the main efficiency drag.`;
   }
@@ -919,6 +1206,122 @@ const campaignVerdict = (c, baselineCpa, isAnomaly = false, comparable = true) =
     return "Paused with little data — low priority until reactivated.";
   }
   return "Limited data — monitor before acting.";
+};
+
+/**
+ * "What's working" — the account's proven strengths, stated with the same
+ * numeric discipline as the problems. An audit that is 100% complaint reads
+ * like a sales pitch; naming what to protect (and what to re-enable) is half
+ * the value of a senior review. Built only from measured winners: campaigns
+ * with real volume at/below the account average, and devices beating it.
+ */
+const whatsWorkingSection = (audit, currency, totals, findings = []) => {
+  const { baselineCpa, anomalyNames } = accountBaseline(audit, totals);
+  if (!baselineCpa) return null;
+  const rows = [];
+
+  // A winner that carries its own open finding (e.g. "saturating its audience
+  // at 3.24× frequency") must not get an unqualified "protect and scale" — the
+  // caveat keeps this section from contradicting the findings list.
+  const openFindingFor = (name) =>
+    findings.find(
+      (f) =>
+        ["CRITICAL", "HIGH", "MEDIUM"].includes(f.severity) &&
+        (f.evidence?.campaign === name || (name && String(f.title || "").includes(name)))
+    );
+  const caveatFor = (name) => {
+    const open = openFindingFor(name);
+    if (!open) return "";
+    const clause = String(open.title || "")
+      .replace(name, "")
+      .replace(/^[\s—:–-]+/, "")
+      .trim();
+    return clause ? ` But note: it ${clause} — address that finding before scaling further.` : "";
+  };
+
+  const platforms = audit.normalizedDataset?.data?.platforms || {};
+  const campaigns = [];
+  for (const p of Object.values(platforms)) {
+    for (const c of p?.byLevel?.campaign || []) campaigns.push(c);
+  }
+
+  const winners = campaigns
+    .filter((c) => !anomalyNames.has(normName(c.name)))
+    .map((c) => {
+      const conv = num(c.results ?? c.conversions);
+      return {
+        name: c.name || "(unnamed campaign)",
+        conv,
+        paused: isPausedCampaign(c),
+        cpa: c.cpa != null ? num(c.cpa) : conv > 0 ? num(c.spend) / conv : null,
+      };
+    })
+    // Strictly at/below the account average — the campaign table calls anything
+    // above it "room to tighten", and this section must never contradict that.
+    .filter((w) => w.conv >= 20 && w.cpa != null && w.cpa <= baselineCpa)
+    .sort((a, b) => a.cpa - b.cpa)
+    .slice(0, 3);
+  for (const w of winners) {
+    rows.push([
+      w.paused ? `"${w.name}" — proven winner, currently paused` : `"${w.name}" — carrying the account's efficiency`,
+      `${formatMoney(w.cpa, currency)} per result on ${Math.round(w.conv)} conversions, vs the ${formatMoney(baselineCpa, currency)} account average`,
+      (w.paused
+        ? "Re-enable it — a campaign that already proved this cost is the fastest efficiency win available."
+        : "Protect its targeting and budget; scale in ~20% steps while the cost per result holds.") +
+        caveatFor(w.name),
+    ]);
+  }
+
+  const deviceRecs = recordsAtLevel(audit, "campaign_device")
+    .concat(recordsAtLevel(audit, "device"))
+    .map((r) => ({
+      campaign: r.campaignName || "—",
+      device: r.device || r.deviceType || "—",
+      spend: num(r.spend),
+      conv: num(r.conversions ?? r.results),
+    }));
+  // Per-campaign device spend, to spot a MINORITY device outperforming. The
+  // dominant device (mobile at 95% of a campaign) IS the campaign — calling it
+  // a separate strength would just repeat the campaign row above.
+  const campaignDeviceSpend = new Map();
+  for (const r of deviceRecs) {
+    campaignDeviceSpend.set(r.campaign, (campaignDeviceSpend.get(r.campaign) || 0) + r.spend);
+  }
+  const devWinners = deviceRecs
+    .filter((r) => r.conv >= 3 && r.spend > 0)
+    .map((r) => ({ ...r, cpa: r.spend / r.conv, share: r.spend / (campaignDeviceSpend.get(r.campaign) || r.spend) }))
+    .filter((r) => r.cpa <= baselineCpa * 0.75 && r.share < 0.5)
+    .sort((a, b) => a.cpa - b.cpa)
+    .slice(0, 2);
+  for (const d of devWinners) {
+    rows.push([
+      `${cleanSegmentValue(d.device)} in "${d.campaign}" beats the account average`,
+      `${formatMoney(d.cpa, currency)} per result on ${Math.round(d.conv)} conversions, vs the ${formatMoney(baselineCpa, currency)} account average`,
+      "Test a positive bid adjustment (+10–20%) on this device in this campaign.",
+    ]);
+  }
+
+  if (!rows.length) return null;
+  return {
+    id: "whats-working",
+    eyebrow: "What's working",
+    title: "The strengths to protect",
+    intro:
+      "Not everything in the account is a problem. These are the measured winners — the campaigns and segments already performing at or better than the account average — and the move that protects each one.",
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Strength", align: "left" },
+          { header: "The numbers", align: "left" },
+          { header: "Keep doing", align: "left" },
+        ],
+        currency,
+        rows: rows.slice(0, 5),
+        footnote: "Winners are judged on real conversion volume against the account average — not on impressions or clicks alone.",
+      },
+    ],
+  };
 };
 
 /**
@@ -940,8 +1343,13 @@ const campaignDeepDiveSection = (audit, currency, totals, scope) => {
   // Scope the comparison to the campaigns the client can act on: when active
   // campaigns exist, compare ALL of them (the paused cohort is disclosed in the
   // Active vs Paused breakdown). All-paused accounts fall back to showing those.
-  const activeScoped = scope?.hasActive;
-  if (activeScoped) rows = scope.active;
+  // With fewer than 2 active campaigns the active-only view collapses — exactly
+  // the "live on one loser while winners sit paused" account shape where this
+  // table matters most — so widen back to every campaign that spent; the Status
+  // column carries the active/paused distinction.
+  let activeScoped = scope?.hasActive;
+  if (activeScoped && scope.active.length >= 2) rows = scope.active;
+  else activeScoped = false;
   if (rows.length < 2) return null;
 
   // Baseline from the same cohort being compared (active when scoped), so it isn't
@@ -959,18 +1367,45 @@ const campaignDeepDiveSection = (audit, currency, totals, scope) => {
   // client asked for — capped only so a huge account can't blow up the document.
   const ranked = rows.sort((a, b) => num(b.spend) - num(a.spend)).slice(0, MAX_COMPARISON_ROWS);
 
+  // Bidding column — strategy + its set target ("tCPA PKR 160"), the setting a
+  // strategist reads first when a campaign misses its own goal.
+  const biddingCell = (c) => {
+    const strategy = String(c.bidStrategy || "").toUpperCase();
+    const tCpa = num(c.targetCpa);
+    const tRoas = num(c.targetRoas);
+    if (strategy.includes("TARGET_CPA") || (tCpa > 0 && !strategy)) {
+      return tCpa > 0 ? `tCPA ${formatMoney(tCpa, currency)}` : "Target CPA";
+    }
+    if (strategy.includes("TARGET_ROAS")) return tRoas > 0 ? `tROAS ${tRoas.toFixed(1)}×` : "Target ROAS";
+    if (strategy.includes("MAXIMIZE_CONVERSION_VALUE")) return "Max Conv Value";
+    if (strategy.includes("MAXIMIZE_CONVERSIONS")) return "Max Conversions";
+    if (strategy.includes("MANUAL")) return "Manual CPC";
+    return strategy ? cleanReportText(strategy.toLowerCase()) : "—";
+  };
+
+  // Mixed live+paused view (we widened because <2 campaigns are active): the
+  // pill must say WHICH rows are live — "the account is live on its worst
+  // performer" is unreadable without it. Tone still reflects performance, so a
+  // green "Paused" pill reads as a parked winner and a red "Live" as the leak.
+  const mixedScope = !activeScoped && scope?.hasActive;
+
   const tableRows = ranked.map((c) => {
     const results = num(c.results ?? c.conversions);
     const cpa = c.cpa != null ? num(c.cpa) : results > 0 ? num(c.spend) / results : null;
     const isAnomaly = anomalyNames.has(normName(c.name));
     const cohortBase = cohortBaselineFor(c, cohorts);
     const comparable = cohortBase != null;
+    const perf = campaignStatus(c, cohortBase ?? baselineCpa, isAnomaly, comparable); // { status, text }
+    const statusCell = mixedScope
+      ? { status: perf.status, text: isPausedCampaign(c) ? "Paused" : "Live" }
+      : perf;
     return [
       c.name || "(unnamed campaign)",
+      biddingCell(c),
       num(c.spend),
       String(Math.round(results)),
       cpa != null ? formatMoney(cpa, currency) : "—",
-      campaignStatus(c, cohortBase ?? baselineCpa, isAnomaly, comparable), // { status, text }
+      statusCell,
       campaignVerdict(c, cohortBase ?? baselineCpa, isAnomaly, comparable),
     ];
   });
@@ -997,17 +1432,18 @@ const campaignDeepDiveSection = (audit, currency, totals, scope) => {
         type: "data_table",
         columns: [
           { header: "Campaign", align: "left" },
-          { header: "Spend", align: "right", width: "100px" },
-          { header: "Results", align: "right", width: "70px" },
-          { header: "Cost / result", align: "right", width: "110px" },
-          { header: "Status", align: "left", width: "108px" },
+          { header: "Bidding", align: "left", width: "104px" },
+          { header: "Spend", align: "right", width: "92px" },
+          { header: "Results", align: "right", width: "64px" },
+          { header: "Cost / result", align: "right", width: "100px" },
+          { header: "Status", align: "left", width: "96px" },
           { header: "Verdict", align: "left" },
         ],
         currency,
         rows: tableRows,
         footnote: activeScoped
           ? "Cost per result uses each campaign's own conversions; the verdict compares it to the active baseline. Comparison covers active campaigns; the paused total is in the Active vs Paused breakdown."
-          : "Cost per result uses each campaign's own conversions; the verdict compares it to the account baseline.",
+          : "Cost per result uses each campaign's own conversions; the verdict compares it to the account baseline. Paused campaigns that spent in the window are included — their status column says so.",
       },
     ],
   };
@@ -1055,8 +1491,11 @@ const campaignCardsSection = (audit, currency, totals, scope) => {
       if (num(c.spend) > 0) all.push(c);
     }
   }
-  const activeScoped = scope?.hasActive;
-  if (activeScoped) all = scope.active; // top active campaigns only
+  // Same widening as the deep-dive table: with <2 active campaigns the cards
+  // section would vanish exactly when the paused-winner comparison matters most.
+  let activeScoped = scope?.hasActive;
+  if (activeScoped && scope.active.length >= 2) all = scope.active; // top active campaigns only
+  else activeScoped = false;
   if (all.length < 2) return null;
 
   const { baselineCpa, anomalyNames } = accountBaseline(audit, activeScoped ? scope.activeTotals : totals);
@@ -1072,6 +1511,21 @@ const campaignCardsSection = (audit, currency, totals, scope) => {
   // Per-conversion-type baselines (anomalies excluded) — a campaign's cost is
   // judged against peers buying the same kind of result, not a blended average.
   const cohorts = buildCohortBaselines(all.filter((c) => !anomalyNames.has(normName(c.name))));
+
+  // When the declared target sits far below anything the account has proven
+  // (PKR 40 target, best campaign PKR 104), scoring every card "709% over" and
+  // demanding a 54% conversion rate is noise, not analysis. Score cards against
+  // the achievable bar instead; the scorecard's aspirational note tells the
+  // target story once.
+  let bestProvenCpa = null;
+  for (const c of all) {
+    if (anomalyNames.has(normName(c.name))) continue;
+    const conv = num(c.results ?? c.conversions);
+    if (conv < 20) continue;
+    const campCpa = c.cpa != null ? num(c.cpa) : num(c.spend) / conv;
+    if (campCpa > 0 && (bestProvenCpa == null || campCpa < bestProvenCpa)) bestProvenCpa = campCpa;
+  }
+  const targetAspirational = targetCpa > 0 && bestProvenCpa != null && targetCpa < bestProvenCpa * 0.6;
 
   const top = all.sort((a, b) => num(b.spend) - num(a.spend)).slice(0, 3);
 
@@ -1100,9 +1554,15 @@ const campaignCardsSection = (audit, currency, totals, scope) => {
     const cohortBase = cohortBaselineFor(c, cohorts);
     const comparable = cohortBase != null;
     if (cpa != null) {
-      // Prefer the client's declared target; otherwise the campaign's cohort
-      // (like-for-like) baseline. Never the blended cross-type average.
-      const ref = targetCpa > 0 ? targetCpa : cohortBase;
+      // Prefer the client's declared target — unless it's aspirational (below
+      // anything proven), in which case the achievable bar scores the card.
+      // Otherwise the campaign's cohort (like-for-like) baseline. Never the
+      // blended cross-type average.
+      const ref = targetAspirational
+        ? (cohortBase ?? bestProvenCpa)
+        : targetCpa > 0
+          ? targetCpa
+          : cohortBase;
       if (isAnomaly) {
         // An implausibly-cheap CPA here is a tracking artifact, not "on target".
         metrics.push({ metric: "Cost per result", value: formatMoney(cpa, currency), target: "verify event", status: "bad", statusLabel: "Tracking?" });
@@ -1112,7 +1572,7 @@ const campaignCardsSection = (audit, currency, totals, scope) => {
         let label = "On target";
         if (ratio > 1.5) { status = "bad"; label = `${Math.round((ratio - 1) * 100)}% over`; }
         else if (ratio > 1.1) { status = "warn"; label = `${Math.round((ratio - 1) * 100)}% over`; }
-        metrics.push({ metric: "Cost per result", value: formatMoney(cpa, currency), target: `vs ${formatMoney(ref, currency)}`, status, statusLabel: label });
+        metrics.push({ metric: "Cost per result", value: formatMoney(cpa, currency), target: `vs ${formatMoney(ref, currency)}${targetAspirational ? " achievable" : ""}`, status, statusLabel: label });
       } else {
         // No declared target and no comparable peer — show the cost, don't judge it.
         metrics.push({ metric: "Cost per result", value: formatMoney(cpa, currency), target: comparable ? "—" : "no peer", status: "neutral" });
@@ -1125,7 +1585,11 @@ const campaignCardsSection = (audit, currency, totals, scope) => {
     // between "nearly there" (BD) and a structural problem (PK at 15× off).
     const cvr = !isAnomaly && clicks > 0 && results > 0 ? (results / clicks) * 100 : null;
     const cpc = clicks > 0 ? spend / clicks : null;
-    const cvrRef = targetCpa > 0 ? targetCpa : cohortBase;
+    const cvrRef = targetAspirational
+      ? (cohortBase ?? bestProvenCpa)
+      : targetCpa > 0
+        ? targetCpa
+        : cohortBase;
     if (cvr != null) {
       const requiredCvr = cpc != null && cvrRef && cvrRef > 0 ? (cpc / cvrRef) * 100 : null;
       if (requiredCvr != null && requiredCvr > 0) {
@@ -1138,6 +1602,26 @@ const campaignCardsSection = (audit, currency, totals, scope) => {
       } else {
         metrics.push({ metric: "Conversion rate", value: `${cvr.toFixed(2)}%`, target: "—", status: "neutral" });
       }
+    }
+
+    // Frequency (Meta/TikTok pulls carry it; Google leaves it null) — the
+    // saturation tell. The reference audit reads CPM inflation off this number.
+    const freq = num(c.frequency);
+    if (freq > 0) {
+      let status = "good";
+      let label = "Healthy";
+      if (freq >= 3) { status = "bad"; label = "Saturating"; }
+      else if (freq >= 2.5) { status = "warn"; label = "Elevated"; }
+      metrics.push({ metric: "Frequency", value: `${freq.toFixed(2)}×`, target: "< 2.5×", status, statusLabel: label });
+    }
+    const cpm = num(c.cpm) || (impressions > 0 ? (spend / impressions) * 1000 : null);
+    const accountCpm = num(totals.impressions) > 0 ? (num(totals.spend) / num(totals.impressions)) * 1000 : null;
+    if (cpm != null && cpm > 0 && accountCpm > 0) {
+      let status = "neutral";
+      let label = "Near account avg";
+      if (cpm <= accountCpm * 0.8) { status = "good"; label = "Below account avg"; }
+      else if (cpm >= accountCpm * 1.3) { status = "warn"; label = `${Math.round((cpm / accountCpm - 1) * 100)}% above avg`; }
+      metrics.push({ metric: "CPM", value: formatMoney(cpm, currency), target: `vs ${formatMoney(accountCpm, currency)} avg`, status, statusLabel: label });
     }
 
     // Status / verdict judge the campaign against like-for-like peers (its cohort
@@ -1229,7 +1713,7 @@ const roadmapSection = (findings, currency) => {
 
   const mkItems = (arr) =>
     arr.slice(0, 5).map((f) => ({
-      action: `**${f.title}:** ${(Array.isArray(f.fixSteps) && f.fixSteps[0]) || "Apply the recommended fix in the platform."}`,
+      action: `**${netAdjustedText(f.title, f, currency)}:** ${(Array.isArray(f.fixSteps) && f.fixSteps[0]) || "Apply the recommended fix in the platform."}`,
       effort: findingEase(f) === "easy" ? "~1 hour" : findingEase(f) === "medium" ? "Half day" : "Technical",
       result: impactLabel(f, currency),
     }));
@@ -1415,6 +1899,7 @@ const geoBreakdownSection = (audit, currency, totals) => {
   const recs = recordsAtLevel(audit, "geo");
   if (recs.length < 2) return null;
   const baseCpa = num(totals.conversions) > 0 ? num(totals.spend) / num(totals.conversions) : null;
+  const totalSpend = num(totals.spend);
   const rows = recs
     .map((r) => ({
       country: r.country || r.countryId || "—",
@@ -1423,7 +1908,9 @@ const geoBreakdownSection = (audit, currency, totals) => {
       conv: num(r.conversions ?? r.results),
       clicks: num(r.clicks),
     }))
-    .filter((r) => r.spend > 0)
+    // Materiality floor: PKR 10 in a market with zero conversions is noise, not
+    // a "Zero conversions" verdict — keep small rows only when they converted.
+    .filter((r) => r.spend > 0 && (r.conv >= 3 || r.spend >= totalSpend * 0.005))
     .sort((a, b) => b.spend - a.spend)
     .slice(0, MAX_DIM_ROWS);
   if (rows.length < 2) return null;
@@ -1462,9 +1949,13 @@ const geoBreakdownSection = (audit, currency, totals) => {
 // Device breakdown — campaign × device, surfaces zero-conversion waste AND an
 // over-performing device as a scale opportunity (the reference's IND-tablet call).
 const deviceBreakdownSection = (audit, currency, totals) => {
-  const recs = recordsAtLevel(audit, "device");
+  // The Google pull stores per-campaign device rows at level "campaign_device";
+  // the bare "device" level only exists on some older/Meta datasets. Looking up
+  // only "device" silently dropped this whole section on Google accounts.
+  const recs = recordsAtLevel(audit, "campaign_device").concat(recordsAtLevel(audit, "device"));
   if (recs.length < 2) return null;
   const baseCpa = num(totals.conversions) > 0 ? num(totals.spend) / num(totals.conversions) : null;
+  const totalSpend = num(totals.spend);
   const rows = recs
     .map((r) => ({
       campaign: r.campaignName || "—",
@@ -1472,7 +1963,9 @@ const deviceBreakdownSection = (audit, currency, totals) => {
       spend: num(r.spend),
       conv: num(r.conversions ?? r.results),
     }))
-    .filter((r) => r.spend > 0)
+    // Materiality floor: a PKR 10 slice with zero conversions is statistical
+    // noise, not evidence — keep a small row only when it actually converted.
+    .filter((r) => r.spend > 0 && (r.conv >= 3 || r.spend >= totalSpend * 0.005))
     .sort((a, b) => b.spend - a.spend)
     .slice(0, MAX_DIM_ROWS);
   if (rows.length < 2) return null;
@@ -1508,6 +2001,170 @@ const deviceBreakdownSection = (audit, currency, totals) => {
   };
 };
 
+const dimensionRecords = (audit, dimension) => {
+  const platforms = audit.normalizedDataset?.data?.platforms || {};
+  const out = [];
+  for (const p of Object.values(platforms)) {
+    for (const r of p?.byDimension?.[dimension] || []) out.push(r);
+  }
+  return out;
+};
+
+// Placement breakdown — Facebook vs Instagram vs Audience Network (the
+// reference Meta audit's Section 6). Account-level dimension totals, so when a
+// tracking-anomaly campaign exists its fake conversions are inside these rows —
+// a too-cheap placement inherits the tracking caveat instead of a "scale this"
+// badge (the never-confidently-wrong rule).
+const placementBreakdownSection = (audit, currency, totals) => {
+  const recs = dimensionRecords(audit, "placement");
+  if (recs.length < 2) return null;
+  const { baselineCpa, anomalyNames } = accountBaseline(audit, totals);
+  const totalSpend = num(totals.spend);
+  const rows = recs
+    .map((r) => ({
+      placement: cleanSegmentValue(r.segment || r.placement || "—"),
+      spend: num(r.spend),
+      conv: num(r.conversions ?? r.results),
+      clicks: num(r.clicks),
+      impressions: num(r.impressions),
+    }))
+    .filter((r) => r.spend > 0 && (r.conv >= 3 || r.spend >= totalSpend * 0.005))
+    .sort((a, b) => b.spend - a.spend)
+    .slice(0, MAX_DIM_ROWS);
+  if (rows.length < 2) return null;
+
+  const tableRows = rows.map((r) => {
+    const cpa = r.conv > 0 ? r.spend / r.conv : null;
+    const cpm = r.impressions > 0 ? (r.spend / r.impressions) * 1000 : null;
+    const share = totalSpend > 0 ? (r.spend / totalSpend) * 100 : 0;
+    let note = "On baseline";
+    if (r.conv === 0) note = "Zero conversions";
+    else if (baselineCpa && cpa != null && cpa < baselineCpa * 0.35 && anomalyNames.size > 0) {
+      note = "Unverified — includes the flagged campaign";
+    } else if (baselineCpa && cpa != null && cpa >= baselineCpa * 2) note = `${(cpa / baselineCpa).toFixed(1)}× baseline`;
+    else if (baselineCpa && cpa != null && cpa <= baselineCpa * 0.75) note = "Beats baseline";
+    return [
+      r.placement,
+      formatMoney(r.spend, currency),
+      `${share.toFixed(1)}%`,
+      String(Math.round(r.conv)),
+      cpaCell(r.spend, r.conv, currency),
+      cpm != null ? formatMoney(cpm, currency) : "—",
+      note,
+    ];
+  });
+
+  return {
+    id: "placement-breakdown",
+    eyebrow: "Placement",
+    title: "Where the spend serves, by platform",
+    intro: "Spend, results, and cost per result by placement platform. A placement paying a large CPM premium while converting worse than the account average is the first exclusion candidate.",
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Placement", align: "left" },
+          { header: "Spend", align: "right", width: "92px" },
+          { header: "Share", align: "right", width: "60px" },
+          { header: "Results", align: "right", width: "64px" },
+          { header: "Cost / result", align: "right", width: "96px" },
+          { header: "CPM", align: "right", width: "80px" },
+          { header: "Note", align: "left", width: "128px" },
+        ],
+        currency,
+        rows: tableRows,
+        footnote:
+          "Account-level placement totals." +
+          (anomalyNames.size > 0
+            ? " The campaign with unverified conversions is included in these rows — an implausibly cheap placement here carries its tracking caveat, not a scale recommendation."
+            : ""),
+      },
+    ],
+  };
+};
+
+// Ad-set breakdown — per-campaign ad set comparison (the reference Meta audit's
+// Section 5: broad vs interest CPL per campaign, and the account's best ad
+// set). Skipped for Google, whose ad groups are covered by the keyword/audience
+// grain and typically carry default names.
+const adSetBreakdownSection = (audit, currency, totals) => {
+  const platforms = audit.normalizedDataset?.data?.platforms || {};
+  const recs = [];
+  for (const [key, p] of Object.entries(platforms)) {
+    if (key === "GOOGLE") continue;
+    for (const r of p?.byLevel?.adset || []) recs.push(r);
+  }
+  if (recs.length < 2) return null;
+  const { baselineCpa, anomalyNames } = accountBaseline(audit, totals);
+  const totalSpend = num(totals.spend);
+  const rows = recs
+    .map((r) => ({
+      campaign: r.campaignName || "—",
+      adSet: r.name || "—",
+      spend: num(r.spend),
+      conv: num(r.results ?? r.conversions),
+      freq: num(r.frequency),
+      anomaly: anomalyNames.has(normName(r.campaignName)),
+    }))
+    .filter((r) => r.spend > 0 && (r.conv >= 3 || r.spend >= totalSpend * 0.005))
+    .sort((a, b) => b.spend - a.spend)
+    .slice(0, MAX_DIM_ROWS);
+  if (rows.length < 2) return null;
+
+  // The single best ad set on real volume — the reference's "should not be
+  // touched" callout — judged only on trusted (non-anomaly) rows.
+  const best = rows
+    .filter((r) => !r.anomaly && r.conv >= 20)
+    .reduce((acc, r) => {
+      const cpa = r.spend / r.conv;
+      return acc == null || cpa < acc.cpa ? { ...r, cpa } : acc;
+    }, null);
+
+  const tableRows = rows.map((r) => {
+    const cpa = r.conv > 0 ? r.spend / r.conv : null;
+    let note = "On baseline";
+    if (r.anomaly) note = "Unverified — see tracking finding";
+    else if (r.conv === 0) note = "Zero conversions";
+    else if (best && r.campaign === best.campaign && r.adSet === best.adSet) note = "Best ad set — protect";
+    else if (baselineCpa && cpa != null && cpa >= baselineCpa * 2) note = `${(cpa / baselineCpa).toFixed(1)}× baseline`;
+    else if (baselineCpa && cpa != null && cpa <= baselineCpa * 0.75) note = "Beats baseline";
+    else if (r.freq >= 2.5) note = `Frequency ${r.freq.toFixed(1)}× — fatiguing`;
+    return [
+      r.campaign,
+      r.adSet,
+      formatMoney(r.spend, currency),
+      String(Math.round(r.conv)),
+      cpaCell(r.spend, r.conv, currency),
+      r.freq > 0 ? `${r.freq.toFixed(2)}×` : "—",
+      note,
+    ];
+  });
+
+  return {
+    id: "adset-breakdown",
+    eyebrow: "Ad sets",
+    title: "Inside each campaign: the ad sets",
+    intro: "Each spending ad set's cost per result and frequency. The same audience split performing differently across campaigns tells you which targeting layer earns its budget — and which ad set to protect.",
+    blocks: [
+      {
+        type: "data_table",
+        columns: [
+          { header: "Campaign", align: "left" },
+          { header: "Ad set", align: "left", width: "110px" },
+          { header: "Spend", align: "right", width: "92px" },
+          { header: "Results", align: "right", width: "64px" },
+          { header: "Cost / result", align: "right", width: "96px" },
+          { header: "Freq", align: "right", width: "56px" },
+          { header: "Note", align: "left", width: "140px" },
+        ],
+        currency,
+        rows: tableRows,
+        footnote: "Frequency above ~2.5× over the window means the audience is seeing the same ads repeatedly — expect CPM inflation until the pool is refreshed.",
+      },
+    ],
+  };
+};
+
 // Audience-by-segment — the reference's Section 4.1: the SAME segment id across
 // campaigns/markets, with CVR and cost per result, proving misapplication.
 const audienceSegmentSection = (audit, currency) => {
@@ -1515,13 +2172,20 @@ const audienceSegmentSection = (audit, currency) => {
   if (recs.length < 2) return null;
   const rows = recs
     .map((r) => ({
-      segment: r.criterionId || r.audienceId || r.segment || "—",
+      // Prefer the audience's human name; fall back to the raw criterion id
+      // wrapped as a label so the renderer can't reformat it as a number
+      // ("2,488,177,887,755").
+      segment:
+        r.audienceLabel || r.audienceName || r.segment ||
+        (r.criterionId || r.audienceId ? `Segment ${r.criterionId || r.audienceId}` : "—"),
       campaign: r.campaignName || r.adGroupName || "—",
       spend: num(r.spend),
       clicks: num(r.clicks),
       conv: num(r.conversions ?? r.results),
     }))
-    .filter((r) => r.spend > 0 || r.clicks > 0)
+    // A segment with a handful of clicks has no readable CVR — keep zero-result
+    // rows only when the click sample is at least double digits.
+    .filter((r) => (r.spend > 0 || r.clicks > 0) && (r.conv > 0 || r.clicks >= 10))
     .sort((a, b) => b.spend - a.spend)
     .slice(0, MAX_DIM_ROWS);
   if (rows.length < 2) return null;
@@ -1573,8 +2237,17 @@ const funnelCvrSection = (audit, currency, totals) => {
   // Only campaigns with a real click sample belong in a CVR comparison — a
   // 5-to-8-click test campaign gives a meaningless CVR (5 conv / 8 clicks = 62%)
   // and produces noise rows. Require a minimum click volume.
+  // Anomaly campaigns (conversions too cheap to be genuine) are excluded
+  // entirely: their fake CVR would (a) render as the table's only "funnel
+  // success", contradicting the tracking finding, and (b) their fake-cheap CPA
+  // would defeat the achievable-target override below, scoring every REAL
+  // campaign against an impossible bar.
+  const { anomalyNames: funnelAnomalies } = accountBaseline(audit, totals);
   const campaigns = recordsAtLevel(audit, "campaign").filter(
-    (c) => num(c.spend) > 0 && num(c.clicks) >= MIN_FUNNEL_CLICKS
+    (c) =>
+      num(c.spend) > 0 &&
+      num(c.clicks) >= MIN_FUNNEL_CLICKS &&
+      !funnelAnomalies.has(normName(c.name))
   );
   if (campaigns.length < 1) return null;
 
@@ -1585,13 +2258,18 @@ const funnelCvrSection = (audit, currency, totals) => {
   // campaign — including the proven winner — "downstream", which flatly
   // contradicts the lead ("re-enable this winner"). So measure against the
   // achievable floor: max(target, best achieved CPA).
-  const achievedCpas = campaigns
-    .map((c) => {
-      const conv = num(c.results ?? c.conversions);
-      return conv > 0 ? num(c.spend) / conv : null;
-    })
-    .filter((v) => v != null && v > 0);
-  const bestCpa = achievedCpas.length ? Math.min(...achievedCpas) : null;
+  // The achievable bar needs PROVEN volume (≥20 conversions) — a 15-conversion
+  // side campaign's PKR 94 must not set a stricter bar than the PKR 104 the
+  // cards and scorecard use. Fall back to any converting campaign only when
+  // nothing has real volume.
+  const cpaOfCampaign = (c) => {
+    const conv = num(c.results ?? c.conversions);
+    return conv > 0 ? { cpa: num(c.spend) / conv, conv } : null;
+  };
+  const achieved = campaigns.map(cpaOfCampaign).filter((v) => v != null && v.cpa > 0);
+  const proven = achieved.filter((v) => v.conv >= 20);
+  const pool = proven.length ? proven : achieved;
+  const bestCpa = pool.length ? Math.min(...pool.map((v) => v.cpa)) : null;
   const effectiveTarget = bestCpa != null ? Math.max(target, bestCpa) : target;
   const targetOverridden = bestCpa != null && bestCpa > target;
 
@@ -1656,7 +2334,11 @@ const funnelCvrSection = (audit, currency, totals) => {
         ],
         currency,
         rows: tableRows,
-        footnote: "CVR needed = CPC ÷ target CPA. A healthy CTR with an actual CVR far below the required rate points downstream (landing page / offer / tracking), not to the ads.",
+        footnote:
+          "CVR needed = CPC ÷ target CPA. A healthy CTR with an actual CVR far below the required rate points downstream (landing page / offer / tracking), not to the ads." +
+          (funnelAnomalies.size > 0
+            ? " The campaign whose conversions are too cheap to be genuine is excluded — its conversion rate cannot be trusted (see the tracking-integrity finding)."
+            : ""),
       },
     ],
   };
@@ -1676,7 +2358,13 @@ const opportunitiesSection = (findings, currency) => {
       (Array.isArray(f.fixSteps) && f.fixSteps[0]) ||
       f.estimatedImpact ||
       "Review and action this in the platform.";
-    return [f.title, cleanReportText(String(move)).slice(0, 160)];
+    // Name concrete examples when the engine collected them ("26 idle campaigns"
+    // means little; naming three makes it checkable in the platform).
+    const examples = Array.isArray(f.evidence?.examples)
+      ? f.evidence.examples.filter(Boolean).slice(0, 3)
+      : [];
+    const exampleNote = examples.length ? ` E.g. ${examples.map((n) => `"${n}"`).join(", ")}.` : "";
+    return [f.title, `${cleanReportText(String(move)).slice(0, 160)}${exampleNote}`];
   });
   return {
     id: "opportunities",
@@ -1715,6 +2403,7 @@ export const buildReportDocumentFromAudit = (audit) => {
   // Pull ALL campaigns (active + paused); the report shows the total and splits it
   // active vs paused. Headline = total; the comparison focuses on the active set.
   const scope = getCampaignScope(audit);
+  const campaignNames = collectCampaignNames(audit);
   const findings = sortFindingsForReport(audit.ruleFindings || []);
   if (!findings.length) return noFindingsDocument({ audit, currency, totals });
 
@@ -1801,11 +2490,19 @@ export const buildReportDocumentFromAudit = (audit) => {
   const scopeBreakdown = scopeBreakdownSection(scope, currency);
   if (scopeBreakdown) sections.push(scopeBreakdown);
 
+  // What's working — measured strengths before the problem inventory, so the
+  // report reads like a review, not a complaint sheet.
+  const working = whatsWorkingSection(audit, currency, totals, findings);
+  if (working) sections.push(working);
+
   if (quantified.length > 0) {
     const maxImpact = Math.max(
       ...quantified.map((f) => findingRecoverable(f)),
       1
     );
+    const shown = quantified.slice(0, 6);
+    const shownSum = shown.reduce((s, f) => s + findingRecoverable(f), 0);
+    const sumsToHeadline = recoverable > 0 && Math.abs(shownSum - recoverable) <= Math.max(1, recoverable * 0.01);
     sections.push({
       id: "money-map",
       eyebrow: "Money map",
@@ -1814,10 +2511,10 @@ export const buildReportDocumentFromAudit = (audit) => {
       blocks: [
         {
           type: "bar_chart_h",
-          rows: quantified.slice(0, 6).map((f) => {
+          rows: shown.map((f) => {
             const value = findingRecoverable(f);
             return {
-              label: f.title,
+              label: netAdjustedText(f.title, f, currency),
               value,
               max: maxImpact,
               tone: f === top ? "warn" : "brand",
@@ -1826,7 +2523,9 @@ export const buildReportDocumentFromAudit = (audit) => {
           }),
           currency,
           gridlines: true,
-          caption: "Measured recoverable spend by finding.",
+          caption: sumsToHeadline
+            ? `Overlap-adjusted recoverable spend by finding — the amounts sum to the ${formatMoney(recoverable, currency)} headline total.`
+            : `Overlap-adjusted recoverable spend by finding (top ${shown.length} of ${quantified.length} quantified findings).`,
         },
       ],
     });
@@ -1886,17 +2585,32 @@ export const buildReportDocumentFromAudit = (audit) => {
   if (funnel) sections.push(funnel);
   const geoBreak = geoBreakdownSection(audit, currency, totals);
   if (geoBreak) sections.push(geoBreak);
+  const placementBreak = placementBreakdownSection(audit, currency, totals);
+  if (placementBreak) sections.push(placementBreak);
   const deviceBreak = deviceBreakdownSection(audit, currency, totals);
   if (deviceBreak) sections.push(deviceBreak);
+  const adSetBreak = adSetBreakdownSection(audit, currency, totals);
+  if (adSetBreak) sections.push(adSetBreak);
   const audienceSeg = audienceSegmentSection(audit, currency);
   if (audienceSeg) sections.push(audienceSeg);
 
+  // Creative & copy — data-grounded ad copy / creative / extension suggestions.
+  const creative = creativeSection(audit, findings, currency);
+  if (creative) sections.push(creative);
+
   sections.push({
     id: "finding-detail",
+    // Every finding that claims money (or blocks delivery) gets a full evidence
+    // card — a "wasting PKR 4,094" row in the table with no card to explain the
+    // baseline math is exactly the unexplained-finding complaint. Top 6 by
+    // leverage always render; money findings beyond that are appended (cap 10).
     eyebrow: "Evidence",
     title: "The evidence, finding by finding",
     intro: "Each finding shows what is happening, the business impact, supporting evidence, confidence, and the recommended fix.",
-    blocks: findings.slice(0, 6).map((finding) => findingBlock(finding, currency)),
+    blocks: findings
+      .filter((finding, index) => index < 6 || findingRecoverable(finding) > 0 || finding.evidence?.blocksDelivery === true)
+      .slice(0, 10)
+      .map((finding) => findingBlock(finding, currency, campaignNames)),
   });
 
   const benchmarkComparisons = audit.aiReport?.output?.benchmarkComparisons || [];
@@ -1942,14 +2656,25 @@ export const buildReportDocumentFromAudit = (audit) => {
       }
     : undefined;
 
+  // Truncate at a word boundary — a hard slice cut headlines mid-word
+  // ("…too cheap to be genuine — like").
+  const truncateHeadline = (text, max = 100) => {
+    const s = String(text || "");
+    if (s.length <= max) return s;
+    const cut = s.slice(0, max - 1);
+    const atWord = cut.slice(0, cut.lastIndexOf(" "));
+    return `${atWord || cut}…`;
+  };
+
   return {
     masthead: {
-      headline: integrityFinding || topMoney > 0 ? `${top.title}`.slice(0, 80) : `${platformLabel} needs cleanup`,
+      headline: integrityFinding || topMoney > 0 ? truncateHeadline(netAdjustedText(top.title, top, currency)) : `${platformLabel} needs cleanup`,
       subline: integrityFinding
         ? top.detail
         : topMoney > 0
-          ? top.estimatedImpact
+          ? netAdjustedText(top.estimatedImpact, top, currency)
           : "The largest risks are structural and not safely quantifiable from available data.",
+      prepared_for: audit.organization?.name || audit.adAccount?.name || null,
       platform: platformDocLabels[platform] || "google_ads",
       health_score: score,
       score_band: scoreBand(score),
@@ -1965,14 +2690,14 @@ export const buildReportDocumentFromAudit = (audit) => {
     ],
     executive_summary: {
       verdict: topMoney > 0
-        ? `The single most important finding in this audit: ${top.estimatedImpact}`
+        ? `The single most important finding in this audit: ${netAdjustedText(top.estimatedImpact, top, currency)}`
         : `The biggest issue is ${top.title}. It is a business risk, but the available data does not support a reliable money estimate.`,
       paragraphs: [
         // Root-cause synthesis leads when the account has a binding constraint
         // (a policy block or a geo misconfiguration), framing the real story
         // before the lead-issue restatement.
         ...(rootCauseSynthesis(findings) ? [rootCauseSynthesis(findings)] : []),
-        `**Lead issue:** ${top.title}. ${top.detail || top.estimatedImpact || "This is the highest-priority finding in the account data."}`,
+        `**Lead issue:** ${netAdjustedText(top.title, top, currency)}. ${emphasizeCampaignNames(netAdjustedText(top.detail, top, currency), campaignNames) || top.estimatedImpact || "This is the highest-priority finding in the account data."}`,
         `**Why it matters:** Findings are ranked by leverage — the most damaging issue leads (severity and root-cause gravity first, then confidence and recoverable spend), not simply the biggest dollar figure.`,
         "**Next move:** Start with the first issue in this report, then re-run the audit after the next full reporting cycle to measure the delta.",
       ],
@@ -1984,7 +2709,7 @@ export const buildReportDocumentFromAudit = (audit) => {
       intro: "This sequence prioritizes business impact first, then confidence and ease of implementation.",
       rows: findings.slice(0, 5).map((f, index) => ({
         order: index + 1,
-        action: `**${f.title}:** ${(Array.isArray(f.fixSteps) && f.fixSteps[0]) || "Apply the recommended fix in the platform."}`,
+        action: `**${netAdjustedText(f.title, f, currency)}:** ${(Array.isArray(f.fixSteps) && f.fixSteps[0]) || "Apply the recommended fix in the platform."}`,
         effort: findingEase(f) === "easy" ? "~1 hour" : findingEase(f) === "medium" ? "Half day" : "Technical",
         result: impactLabel(f, currency),
         result_tone: moneyMagnitude(f.estimatedImpact) > 0 ? "good" : "neutral",
@@ -1993,6 +2718,12 @@ export const buildReportDocumentFromAudit = (audit) => {
     },
     method_notes: [
       { label: "Numbers", text: "Every figure comes from verified account data. The report does not invent chart values." },
+      ...(recoverable > 0
+        ? [{
+            label: "Money figures",
+            text: `Each finding shows the spend recoverable by that single fix. Where several findings describe the same wasted spend from different angles (campaign, audience, device, geography), it is counted once — those findings are labeled "same spend (counted above)". The headline "Recoverable this period" (${formatMoney(recoverable, currency)}) is the sum of the overlap-adjusted amounts, so the finding figures add up to it exactly.`,
+          }]
+        : []),
       ...(scope.hasPaused && scope.hasActive
         ? [{
             label: "Scope",
