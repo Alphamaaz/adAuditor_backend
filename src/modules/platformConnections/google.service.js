@@ -457,6 +457,38 @@ export const fetchDailySegments = async (accessToken, customerId, dateRange = "L
 };
 
 /**
+ * Fetch campaign-level daily time series (campaign.name × segments.date).
+ * One row per campaign per day — powers per-campaign trend analysis the
+ * account-level daily series averages away. Best-effort.
+ */
+export const fetchCampaignDailySeries = async (
+  accessToken,
+  customerId,
+  dateRange = "LAST_30_DAYS",
+  loginCustomerId = null
+) => {
+  const query = `
+    SELECT
+      campaign.id,
+      campaign.name,
+      segments.date,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM campaign
+    WHERE ${dateFilter(dateRange)}
+      AND campaign.status != 'REMOVED'
+    ORDER BY segments.date
+    LIMIT 10000
+  `;
+  const results = await searchGoogleAds(accessToken, customerId, query, null, loginCustomerId);
+  console.log(`[Google Ads] ✓ Fetched ${results.length} campaign-daily row(s).`);
+  return results;
+};
+
+/**
  * Fetch account-level segment breakdowns (device, day-of-week, ad network).
  * Each is an independent GAQL query FROM customer, so metrics aggregate at the
  * account level — one row per segment value. Powers per-segment waste analysis

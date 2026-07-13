@@ -536,16 +536,49 @@ const inferAccountTargetCpa = (dataset, platform) => {
 };
 
 /**
+ * The declared intake target is only comparable when it's in the account's
+ * reporting currency. A $40 target judged against PKR figures reads "287% over
+ * target" while actually sitting ~50× under it — every target-based verdict in
+ * the report inverts. Mismatch only when BOTH currencies are known and differ
+ * (an intake without a currency keeps legacy behavior — most users type the
+ * target in their account currency). Returns `{ value, currencyMismatch,
+ * intakeCurrency, declaredRaw }` — value is 0 when unusable so callers can
+ * disclose why the comparison was skipped.
+ */
+export const usableDeclaredTargetCpa = (audit, accountCurrency) => {
+  const sectionA = audit?.businessProfileSnapshot?.sectionA || {};
+  const declaredRaw = numberValue(sectionA.targetCpa);
+  const intakeCurrency = sectionA.currency || null;
+  if (declaredRaw <= 0) {
+    return { value: 0, currencyMismatch: false, intakeCurrency, declaredRaw: 0 };
+  }
+  const currencyMismatch = Boolean(
+    intakeCurrency && accountCurrency && intakeCurrency !== accountCurrency
+  );
+  return {
+    value: currencyMismatch ? 0 : declaredRaw,
+    currencyMismatch,
+    intakeCurrency,
+    declaredRaw,
+  };
+};
+
+/**
  * The target CPA to judge the account against: the declared intake target if
- * present, else one inferred from the campaigns' own tCPA settings (disclosed as
- * inferred). `{ value, source: 'declared'|'inferred'|'none' }`.
+ * present (and in the account's currency), else one inferred from the
+ * campaigns' own tCPA settings (disclosed as inferred).
+ * `{ value, source: 'declared'|'inferred'|'none', currencyMismatch }`.
  */
 const resolveTargetCpa = (audit, dataset, platform) => {
-  const declared = numberValue(audit?.businessProfileSnapshot?.sectionA?.targetCpa);
-  if (declared > 0) return { value: declared, source: "declared" };
+  const declared = usableDeclaredTargetCpa(audit, getReportCurrency(dataset, platform));
+  if (declared.value > 0) {
+    return { value: declared.value, source: "declared", currencyMismatch: false };
+  }
   const inferred = inferAccountTargetCpa(dataset, platform);
-  if (inferred && inferred > 0) return { value: inferred, source: "inferred" };
-  return { value: 0, source: "none" };
+  if (inferred && inferred > 0) {
+    return { value: inferred, source: "inferred", currencyMismatch: declared.currencyMismatch };
+  }
+  return { value: 0, source: "none", currencyMismatch: declared.currencyMismatch };
 };
 
 const getReportCurrency = (dataset, platform) => {
@@ -2114,9 +2147,16 @@ const addBusinessProfileFindings = ({ audit, dataset, findings }) => {
   }
 
   // ── A3: Target CPA miss ───────────────────────────────────────────────────
-  const targetCpa = numberValue(sectionA.targetCpa);
-  if (targetCpa > 0) {
+  if (numberValue(sectionA.targetCpa) > 0) {
     for (const platform of platforms) {
+      // Skip when the intake target is declared in a different currency than
+      // the account reports in — comparing $40 against PKR figures inverts
+      // every verdict.
+      const { value: targetCpa } = usableDeclaredTargetCpa(
+        audit,
+        getReportCurrency(dataset, platform)
+      );
+      if (targetCpa <= 0) continue;
       const summary = getPlatformSummary(dataset, platform);
       if (summary.spend > 0 && summary.conversions > 0) {
         // Trusted (anomaly-excluded) cost per result: the blended CPA is deflated
@@ -2158,6 +2198,16 @@ const addBusinessProfileFindings = ({ audit, dataset, findings }) => {
   const avgOrderValue = numberValue(sectionA.avgOrderValue);
   if (targetRoas > 0 && avgOrderValue > 0) {
     for (const platform of platforms) {
+      // Same currency gate as A3: revenue estimated from an intake-currency AOV
+      // divided by account-currency spend produces a meaningless ROAS.
+      const accountCurrency = getReportCurrency(dataset, platform);
+      if (
+        sectionA.currency &&
+        accountCurrency &&
+        sectionA.currency !== accountCurrency
+      ) {
+        continue;
+      }
       const summary = getPlatformSummary(dataset, platform);
       if (summary.spend > 0 && summary.conversions > 0) {
         const estimatedRevenue = summary.conversions * avgOrderValue;
@@ -4278,7 +4328,12 @@ const addGoogleBiddingFindings = ({ audit, dataset, findings }) => {
     conversions: summary.conversions,
   });
   const sectionA = audit.businessProfileSnapshot?.sectionA || {};
-  const targetCpa = numberValue(sectionA.targetCpa);
+  // Currency-gated: a declared target in another currency must not become the
+  // bidding reference (falls back to the account baseline instead).
+  const { value: targetCpa } = usableDeclaredTargetCpa(
+    audit,
+    getReportCurrency(dataset, "GOOGLE")
+  );
   const intakeCurrency = sectionA.currency || "USD";
   const reference = targetCpa > 0 ? targetCpa : baseCpa; // prefer the declared target
   if (reference == null || reference <= 0) return;

@@ -122,7 +122,12 @@ const formatCellValue = (value, label = "", currency = "USD") => {
   if (/not quantified|impact not quantifiable|not safely quantifiable/i.test(text)) {
     return moneyLikeLabel(label) ? "Business risk" : "Needs review";
   }
-  const money = text.match(/(\$|[A-Z]{3})\s?([\d,]+(?:\.\d+)?)(.*)$/i);
+  // Money normalization is for short value cells ("About PKR 8,524 recoverable"
+  // → "PKR 8,524 recoverable") — it discards everything before the match, so it
+  // must never run on prose. Case-sensitive with a required digit: with /i and
+  // bare-comma amounts, "real leads, not…" matched as currency "ADS" amount ","
+  // and truncated the sentence.
+  const money = !isProseCell(text) && text.match(/(\$|[A-Z]{3})\s?(\d[\d,]*(?:\.\d+)?)(.*)$/);
   if (money && moneyLikeLabel(label)) {
     // Preserve a 3-letter currency code already present in the string — it was
     // formatted upstream with the account's real currency (e.g. "PKR 11,021").

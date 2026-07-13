@@ -5,6 +5,13 @@ import { buildAiAuditContext } from "../modules/audits/aiContext.service.js";
 import { generateAiAuditReport } from "../modules/audits/aiProvider.service.js";
 import { runDeepAudit } from "../modules/audits/agent/orchestrator.js";
 import { isDeepAuditEnabled, DEEP_AUDIT_MODEL } from "../modules/audits/agent/config.js";
+import { runAnalyst } from "../modules/audits/analyst/analystRun.service.js";
+import { verifyAnalystReport } from "../modules/audits/analyst/analystVerification.service.js";
+import {
+  isAnalystEnabled,
+  ANALYST_MODEL,
+  resolveAnalystModel,
+} from "../modules/audits/analyst/analystConfig.js";
 import {
   validateAiReportOutput,
   validateAiReportFactuality,
@@ -96,6 +103,7 @@ const fullAuditInclude = {
   normalizedDataset: true,
   ruleFindings: { orderBy: { createdAt: "desc" } },
   aiReport: true,
+  analystReport: true,
   pdfReports: { orderBy: { version: "desc" } },
   organization: { select: { brandingSettings: true } },
 };
@@ -338,13 +346,23 @@ const tryGenerateValidatedAiReport = async ({
       });
 
       if (validation.isValid) {
-        // Lightweight factuality pass — never hard-fails (keeps retries/
-        // fallback intact), but surfaces invented dollar figures for
-        // monitoring + future prompt tuning.
+        // Customer-visible money must exist in verified evidence. A fabricated
+        // amount consumes an attempt; repeated failure keeps the deterministic
+        // report instead of publishing unsupported numbers.
         const factuality = validateAiReportFactuality({
           output: generated.output,
           verifiedNumbers: context?.evidencePacket?.verifiedNumbers || [],
         });
+        if (!factuality.ok) {
+          attempts.push({
+            attempt,
+            type: "FACTUALITY_FAILED",
+            provider: generated.provider,
+            model: generated.model,
+            errors: factuality.warnings,
+          });
+          continue;
+        }
         const genericCheck = validateRecommendationsNotGeneric({
           output: generated.output,
         });
@@ -353,10 +371,7 @@ const tryGenerateValidatedAiReport = async ({
           attempt,
           report: generated,
           attempts,
-          factualityWarnings: [
-            ...factuality.warnings,
-            ...genericCheck.warnings,
-          ],
+          qualityWarnings: [...genericCheck.warnings],
         };
       }
 
@@ -416,6 +431,39 @@ const buildFactSourceMap = ({ output, findings }) => {
     topPriorities,
     recommendations,
   };
+};
+
+const verifiedAnalystMoneyValues = (report) => {
+  const figureLists = [
+    report?.executiveFigures,
+    report?.rootCauseFigures,
+    ...(report?.findings || []).map((item) => item?.figures),
+    ...(report?.campaignDeepDives || []).map((item) => item?.figures),
+    ...(report?.ruleFindingDispositions || []).map((item) => item?.figures),
+    ...(report?.recommendations || []).map((item) => item?.figures),
+  ];
+  const moneyMetric = /^(spend|cost|revenue|conversionValue|dailyBudget|budget)$/i;
+  const values = new Set();
+  for (const figure of figureLists.flatMap((list) => list || [])) {
+    if (figure?.verified !== true) continue;
+    const compute = figure.compute || {};
+    const ratioMoney =
+      compute.op === "ratio" &&
+      /^(spend|cost)$/i.test(String(compute.numerator || "")) &&
+      /^(conversions|results|clicks|impressions)$/i.test(
+        String(compute.denominator || "")
+      );
+    const isMoney =
+      compute.op === "excess_spend" ||
+      (["raw", "sum"].includes(compute.op) &&
+        moneyMetric.test(String(compute.metric || ""))) ||
+      ratioMoney;
+    const value = Number(figure.value);
+    if (isMoney && Number.isFinite(value) && value > 0) {
+      values.add(Math.round(value));
+    }
+  }
+  return [...values];
 };
 
 /**
@@ -527,6 +575,126 @@ export const processGenerateAiReport = async ({ auditId }) => {
     }
   }
 
+  // AI Analyst — full-data analysis with deterministic figure verification
+  // (spec: docs/AI_ANALYST_SPEC.md). Best-effort: any failure here degrades to
+  // the deterministic pipeline; the analyst can only ADD to a report.
+  let verifiedAnalyst = null;
+  if (isAnalystEnabled()) {
+    try {
+      const analystArgs = {
+        audit: auditWithReadiness,
+        // Per-plan model gating (spec §7): free/starter run the budget model,
+        // pro/agency the flagship. ANALYST_MODEL env overrides for every tier.
+        model: resolveAnalystModel(planAtRunTime?.slug),
+      };
+      let analystRun;
+      try {
+        analystRun = await runAnalyst(analystArgs);
+      } catch (firstError) {
+        // One retry on transient transport/server errors — the analyst call
+        // streams for minutes and a single dropped connection ("terminated",
+        // "fetch failed") otherwise silently downgrades the whole report to
+        // rules-only. Schema/validation errors are NOT retried: same input,
+        // same failure.
+        const transient = /terminated|fetch failed|econnreset|etimedout|socket hang up|network|overloaded|\b(5\d\d|429)\b/i.test(
+          String(firstError?.message || "")
+        );
+        if (!transient) throw firstError;
+        console.warn(
+          `[auditPipeline] analyst transient error ("${firstError.message}") — retrying once`
+        );
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        analystRun = await runAnalyst(analystArgs);
+      }
+      const verified = verifyAnalystReport({
+        report: analystRun.report,
+        audit: auditWithReadiness,
+        quarantinedCampaigns: analystRun.quarantinedCampaigns,
+      });
+      verifiedAnalyst = {
+        report: verified.report,
+        verification: { stats: verified.stats },
+      };
+
+      await recordAiUsage({
+        organizationId: audit.organizationId,
+        auditId,
+        provider: "anthropic",
+        model: analystRun.model,
+        purpose: "analyst",
+        inputTokens: analystRun.usage.inputTokens,
+        outputTokens: analystRun.usage.outputTokens,
+        status: "SUCCESS",
+      });
+
+      // Best-effort persistence — if the AnalystReport table isn't pushed yet
+      // the report still renders (from rules) and nothing is lost but the run.
+      try {
+        if (prisma.analystReport?.upsert) {
+          const data = {
+            provider: "anthropic",
+            model: analystRun.model,
+            schemaVersion: analystRun.schemaVersion,
+            report: verified.report,
+            verification: {
+              stats: verified.stats,
+              droppedFigures: verified.droppedFigures,
+              droppedClaims: verified.droppedClaims,
+              serialization: analystRun.serialization,
+              quarantinedCampaigns: analystRun.quarantinedCampaigns,
+            },
+            usage: analystRun.usage,
+          };
+          await prisma.analystReport.upsert({
+            where: { auditId },
+            create: { auditId, ...data },
+            update: data,
+          });
+        }
+      } catch (persistError) {
+        console.error("[auditPipeline] analyst persist failed (non-fatal):", persistError.message);
+      }
+
+      await logEvent(auditId, "ANALYST_REPORT_GENERATED", "AI analyst report generated and verified.", {
+        model: analystRun.model,
+        stats: verified.stats,
+        datasetTokens: analystRun.serialization.tokenEstimate,
+        truncations: analystRun.serialization.truncations.length,
+      });
+    } catch (analystError) {
+      await recordAiUsage({
+        organizationId: audit.organizationId,
+        auditId,
+        provider: "anthropic",
+        model: ANALYST_MODEL,
+        purpose: "analyst",
+        inputTokens: 0,
+        outputTokens: 0,
+        status: "ERROR",
+        errorMessage: String(analystError.message || analystError).slice(0, 500),
+      }).catch(() => {});
+      await logEvent(
+        auditId,
+        "ANALYST_REPORT_FAILED",
+        "AI analyst failed; report continues from deterministic findings.",
+        { error: analystError.message }
+      );
+    }
+  }
+
+  if (verifiedAnalyst) {
+    context.verifiedAnalyst = verifiedAnalyst;
+    if (context.evidencePacket) {
+      const analystMoney = verifiedAnalystMoneyValues(verifiedAnalyst.report);
+      context.evidencePacket.verifiedNumbers = [
+        ...new Set([
+          ...(context.evidencePacket.verifiedNumbers || []),
+          ...analystMoney,
+        ]),
+      ].sort((a, b) => a - b);
+    }
+  }
+
   const result = await tryGenerateValidatedAiReport({
     context,
     findings: audit.ruleFindings,
@@ -568,7 +736,8 @@ export const processGenerateAiReport = async ({ auditId }) => {
     attemptsUsed: result.attempt,
     priorAttempts: result.attempts,
     factSourceMap,
-    factualityWarnings: result.factualityWarnings || [],
+    factualityWarnings: [],
+    qualityWarnings: result.qualityWarnings || [],
     defaultDeepAudit: context.deepAudit
       ? {
           mode: context.deepAudit.mode,
@@ -612,20 +781,21 @@ export const processGenerateAiReport = async ({ auditId }) => {
     attemptsUsed: result.attempt,
   });
 
-  // Surface any invented dollar figures for monitoring (non-blocking).
-  if (result.factualityWarnings?.length > 0) {
+  // Non-factual quality warnings remain observable but do not block delivery.
+  if (result.qualityWarnings?.length > 0) {
     await logEvent(
       auditId,
-      "AI_REPORT_FACTUALITY_WARNING",
-      "AI output referenced dollar figures not present in verified evidence.",
-      { warnings: result.factualityWarnings }
+      "AI_REPORT_QUALITY_WARNING",
+      "AI output passed factuality checks but has narrative quality warnings.",
+      { warnings: result.qualityWarnings }
     );
   }
 
   return {
     aiFallbackUsed: false,
     attemptsUsed: result.attempt,
-    factualityWarnings: result.factualityWarnings || [],
+    factualityWarnings: [],
+    qualityWarnings: result.qualityWarnings || [],
   };
 };
 

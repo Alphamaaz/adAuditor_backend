@@ -9,7 +9,12 @@ import {
   buildCohortBaselines,
   cohortBaselineFor,
 } from "../../lib/segments/cohortBaseline.js";
-import { getBenchmark, resolveBusinessType, resolveGoogleNetwork } from "./auditEngine.service.js";
+import { getBenchmark, resolveBusinessType, resolveGoogleNetwork, usableDeclaredTargetCpa } from "./auditEngine.service.js";
+import {
+  applyAnalystMerge,
+  analystSectionsFor,
+  analystExecutiveParagraphs,
+} from "./analyst/analystMerge.js";
 
 /**
  * Account baseline + tracking-anomaly set, computed independently of the engine
@@ -456,7 +461,69 @@ export const sortFindingsForReport = (findings = []) =>
     return (severityWeight[b.severity] || 0) - (severityWeight[a.severity] || 0);
   });
 
-const categoryScoreRows = (audit) => {
+// The analyst labels findings with category slugs; the engine's health-score
+// chart uses per-platform display categories. This mapping lets merged analyst
+// findings land on the chart row they affect. `opportunity` maps to nothing —
+// growth levers aren't health deductions.
+const ANALYST_CATEGORY_TO_ENGINE = {
+  META: {
+    tracking: "Tracking & Pixel Health",
+    measurement: "Attribution & Reporting",
+    structure: "Campaign Structure",
+    budget: "Bidding & Budget",
+    bidding: "Bidding & Budget",
+    creative: "Creative Performance",
+    audience: "Audience Strategy",
+    placement: "Audience Strategy",
+    keywords: "Campaign Structure",
+  },
+  GOOGLE: {
+    tracking: "Conversion Tracking Setup",
+    measurement: "Audience & Attribution",
+    structure: "Campaign Structure",
+    budget: "Bidding Strategy Alignment",
+    bidding: "Bidding Strategy Alignment",
+    creative: "Ad Copy & Extensions",
+    audience: "Audience & Attribution",
+    placement: "Campaign Structure",
+    keywords: "Keyword Strategy",
+  },
+  TIKTOK: {
+    tracking: "Pixel & Tracking Health",
+    measurement: "Attribution & Reporting",
+    structure: "Campaign Structure",
+    budget: "Bidding & Budget",
+    bidding: "Bidding & Budget",
+    creative: "Creative Performance",
+    audience: "Audience Strategy",
+    placement: "Audience Strategy",
+    keywords: "Campaign Structure",
+  },
+};
+
+/**
+ * Per-category counts/severity from the MERGED findings list, keyed by the
+ * chart's display-category names. The engine's categoryScores are computed
+ * before the analyst merge, so without this overlay the chart can say
+ * "Tracking & Pixel Health · no findings — 100" directly above an analyst
+ * CRITICAL tracking finding.
+ */
+const mergedCategoryStats = (findings, platform) => {
+  const slugMap = ANALYST_CATEGORY_TO_ENGINE[platform] || ANALYST_CATEGORY_TO_ENGINE.META;
+  const stats = new Map();
+  for (const f of findings || []) {
+    const raw = String(f.category || "");
+    const name = f.evidence?.source === "analyst" ? slugMap[raw.toLowerCase()] : raw;
+    if (!name) continue;
+    const entry = stats.get(name) || { count: 0, hasCritical: false };
+    entry.count += 1;
+    if (f.severity === "CRITICAL") entry.hasCritical = true;
+    stats.set(name, entry);
+  }
+  return stats;
+};
+
+const categoryScoreRows = (audit, categoryStats = null) => {
   const scores = audit.categoryScores || {};
   const rows = [];
   // categoryMeta (written by the engine next to `categories`) carries each
@@ -488,19 +555,28 @@ const categoryScoreRows = (audit) => {
   return rows
     .filter((row) => row.label && !/^platforms$/i.test(row.label))
     .slice(0, 10)
-    .map(({ label, value, findingCount }) => ({
-      // The basis is part of the label so every score has a visible reason:
-      // "Bidding Strategy Alignment · 3 findings — 14" is explained; a bare
-      // "92" is not.
-      label:
-        findingCount != null
-          ? `${cleanReportText(label)} · ${findingCount === 0 ? "no findings" : `${findingCount} finding${findingCount === 1 ? "" : "s"}`}`
-          : cleanReportText(label),
-      value,
-      max: 100,
-      tone: value < 85 ? "warn" : "brand",
-      display: String(value),
-    }));
+    .map(({ label, value, findingCount }) => {
+      // Overlay from the MERGED findings list (analyst findings included):
+      // counts must match the findings section, and a category carrying a
+      // merged CRITICAL must not display near-healthy — same 40-point cap the
+      // engine applies to its own critical categories.
+      const overlay = categoryStats?.get(label) || null;
+      const count = overlay ? overlay.count : findingCount;
+      const shownValue = overlay?.hasCritical ? Math.min(value, 40) : value;
+      return {
+        // The basis is part of the label so every score has a visible reason:
+        // "Bidding Strategy Alignment · 3 findings — 14" is explained; a bare
+        // "92" is not.
+        label:
+          count != null
+            ? `${cleanReportText(label)} · ${count === 0 ? "no findings" : `${count} finding${count === 1 ? "" : "s"}`}`
+            : cleanReportText(label),
+        value: shownValue,
+        max: 100,
+        tone: shownValue < 85 ? "warn" : "brand",
+        display: String(shownValue),
+      };
+    });
 };
 
 // netRecoverable is hidden because it duplicates the "Recoverable spend" row the
@@ -1004,7 +1080,10 @@ const accountScorecardSection = (audit, currency, totals) => {
   // Prefer the declared intake target; otherwise the engine may have inferred one
   // from the campaigns' own Target-CPA settings (stamped on the summary). Track
   // which so the caption can disclose an inferred target honestly.
-  const declaredTargetCpa = num(sectionA.targetCpa);
+  // Currency-gated: a target declared in another currency (a $40 target on a
+  // PKR account) must not be scored against account-currency figures.
+  const declaredTarget = usableDeclaredTargetCpa(audit, currency);
+  const declaredTargetCpa = declaredTarget.value;
   const inferredTargetCpa = num(
     audit.normalizedDataset?.summary?.platforms?.[platform]?.inferredTargetCpa
   );
@@ -1114,12 +1193,18 @@ const accountScorecardSection = (audit, currency, totals) => {
       : btSource === "declared"
         ? `${businessType} (from your profile)`
         : businessType;
+  // When the saved-profile target was skipped for a currency mismatch, say so —
+  // silently dropping the comparison reads as a data gap, not a decision.
+  const mismatchNote = declaredTarget.currencyMismatch
+    ? ` Your saved target CPA (${declaredTarget.intakeCurrency} ${declaredTarget.declaredRaw}) was not scored against this ${currency} account — restate the target in ${currency} to enable target comparisons.`
+    : "";
   const caption =
     (targetCpa > 0
       ? targetInferred
         ? `CPA target (${formatMoney(targetCpa, currency)}) inferred from your campaigns' own Target-CPA settings — set an account target in intake to score against your actual goal; CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}.`
-        : `CPA target (${formatMoney(targetCpa, currency)}) from your intake; CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}.`
-      : `CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}. Set a target CPA in intake to score CPA against it.`) +
+        : `CPA target (${formatMoney(targetCpa, currency)}) from your saved business profile; CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}.`
+      : `CTR benchmark for ${btQualifier} on ${platformLabels[platform] || platform}.${declaredTarget.currencyMismatch ? "" : " Set a target CPA in intake to score CPA against it."}`) +
+    mismatchNote +
     anomalyNote +
     aspirationalNote;
 
@@ -1232,11 +1317,21 @@ const whatsWorkingSection = (audit, currency, totals, findings = []) => {
   const caveatFor = (name) => {
     const open = openFindingFor(name);
     if (!open) return "";
-    const clause = String(open.title || "")
-      .replace(name, "")
-      .replace(/^[\s—:–-]+/, "")
-      .trim();
-    return clause ? ` But note: it ${clause} — address that finding before scaling further.` : "";
+    const title = String(open.title || "").trim();
+    if (!title) return "";
+    // "it <clause>" only works when the title leads with the campaign name
+    // ('"X" converts clicks at a fraction…' → "it converts clicks…"). A finding
+    // matched by evidence.campaign whose title never names the campaign would
+    // render "it Entire account is paused…" — quote those whole instead.
+    const idx = name ? title.indexOf(name) : -1;
+    if (idx >= 0 && idx <= 1) {
+      const clause = title
+        .slice(idx + String(name).length)
+        .replace(/^["'“”]?[\s—:–-]*/, "")
+        .trim();
+      if (clause) return ` But note: it ${clause} — address that finding before scaling further.`;
+    }
+    return ` But note: an open finding also covers it — “${title}” — address that before scaling further.`;
   };
 
   const platforms = audit.normalizedDataset?.data?.platforms || {};
@@ -1502,9 +1597,10 @@ const campaignCardsSection = (audit, currency, totals, scope) => {
   const sectionA = audit.businessProfileSnapshot?.sectionA || {};
   const { businessType } = resolveBusinessType(audit, audit.normalizedDataset);
   const platform = audit.selectedPlatforms?.[0] || "GOOGLE";
-  // Declared intake target, else the engine's inferred target (campaign tCPAs).
+  // Declared intake target (currency-gated), else the engine's inferred target
+  // (campaign tCPAs — always in account currency).
   const targetCpa =
-    num(sectionA.targetCpa) ||
+    usableDeclaredTargetCpa(audit, currency).value ||
     num(audit.normalizedDataset?.summary?.platforms?.[platform]?.inferredTargetCpa);
   const ccNetwork = platform === "GOOGLE" ? resolveGoogleNetwork(audit.normalizedDataset) : null;
   const ctrBench = getBenchmark("ctr", platform, businessType, ccNetwork);
@@ -2228,8 +2324,9 @@ const audienceSegmentSection = (audit, currency) => {
 // Section 8. Needs a target CPA (declared or inferred).
 const funnelCvrSection = (audit, currency, totals) => {
   const platform = audit.selectedPlatforms?.[0] || "GOOGLE";
-  const sectionA = audit.businessProfileSnapshot?.sectionA || {};
-  const declared = num(sectionA.targetCpa);
+  // Declared target is currency-gated: "CVR needed = CPC ÷ target" is nonsense
+  // when the target is in another currency than the CPC.
+  const declared = usableDeclaredTargetCpa(audit, currency).value;
   const inferred = num(audit.normalizedDataset?.summary?.platforms?.[platform]?.inferredTargetCpa);
   const target = declared > 0 ? declared : inferred;
   if (!(target > 0)) return null;
@@ -2404,8 +2501,24 @@ export const buildReportDocumentFromAudit = (audit) => {
   // active vs paused. Headline = total; the comparison focuses on the active set.
   const scope = getCampaignScope(audit);
   const campaignNames = collectCampaignNames(audit);
-  const findings = sortFindingsForReport(audit.ruleFindings || []);
+  let findings = sortFindingsForReport(audit.ruleFindings || []);
   if (!findings.length) return noFindingsDocument({ audit, currency, totals });
+
+  // AI analyst merge — verified analyst findings join the list, rule findings
+  // the analyst merged/refuted (with a data-backed reason) drop out, and merged
+  // findings' reconciled nets transfer so the headline money is conserved.
+  // (spec: docs/AI_ANALYST_SPEC.md §6)
+  const analystDoc = audit.analystReport?.report || null;
+  const analystStats = audit.analystReport?.verification?.stats || null;
+  if (analystDoc) {
+    const merged = applyAnalystMerge({
+      analystReport: analystDoc,
+      findings,
+      currency,
+      platform: audit.selectedPlatforms?.[0] || null,
+    });
+    findings = sortFindingsForReport(merged.findings);
+  }
 
   // The headline must be a finding that stands on its own. A "secondary" finding
   // is an overlap lens ("the placement view of inefficiency the campaign finding
@@ -2420,12 +2533,23 @@ export const buildReportDocumentFromAudit = (audit) => {
   const integrityFinding = findings.find((f) => f.evidence?.dataIntegrityBroken === true);
   const top = integrityFinding || findings.find((f) => !isSecondaryLens(f)) || findings[0];
   const topMoney = integrityFinding ? 0 : moneyMagnitude(top.estimatedImpact || top.evidence);
-  const score = audit.healthScore ?? 0;
+  // audit.healthScore is computed by the rule engine before the AI analyst
+  // runs. When the analyst's merged findings introduce CRITICAL severity the
+  // rule engine never saw (e.g. a disapproved ad), the displayed score must
+  // not keep presenting as healthy — same cap discipline as the per-category
+  // CRITICAL cap in auditEngine.service.js. Math.min is a no-op when the
+  // engine already capped for its own CRITICAL findings.
+  const rawScore = audit.healthScore ?? 0;
+  const hasCriticalFinding = findings.some((f) => f.severity === "CRITICAL");
+  const score = hasCriticalFinding ? Math.min(rawScore, 40) : rawScore;
   const severityCounts = findings.reduce((acc, f) => {
     acc[f.severity] = (acc[f.severity] || 0) + 1;
     return acc;
   }, {});
-  const scoreRows = categoryScoreRows(audit);
+  const scoreRows = categoryScoreRows(
+    audit,
+    analystDoc ? mergedCategoryStats(findings, audit.selectedPlatforms?.[0] || "META") : null
+  );
   // "Recoverable" = waste you can CUT. A delivery block (a disapproved ad) is
   // restorable upside, not recovered waste — counting it conflates two different
   // things and overstates the headline — so it's excluded here and surfaces as
@@ -2578,6 +2702,12 @@ export const buildReportDocumentFromAudit = (audit) => {
   const campaignCards = campaignCardsSection(audit, currency, totals, scope);
   if (campaignCards) sections.push(campaignCards);
 
+  // Analyst strategist notes — verified per-campaign diagnoses and the ranked
+  // priority-move sequence, written from the full raw dataset.
+  const analystSections = analystDoc ? analystSectionsFor(analystDoc, currency) : [];
+  const analystCampaignNotes = analystSections.find((s) => s.id === "analyst-campaign-notes");
+  if (analystCampaignNotes) sections.push(analystCampaignNotes);
+
   // Dimensional breakdowns — the owned per-dimension sections a senior audit
   // presents (geo, device, audience, funnel). Each is null when its grain wasn't
   // pulled, so a summary-only or thin account simply omits it.
@@ -2636,6 +2766,10 @@ export const buildReportDocumentFromAudit = (audit) => {
   const opportunities = opportunitiesSection(findings, currency);
   if (opportunities) sections.push(opportunities);
 
+  // Analyst priority moves — the strategist's ranked sequence, before the roadmap.
+  const analystMoves = analystSections.find((s) => s.id === "analyst-priority-moves");
+  if (analystMoves) sections.push(analystMoves);
+
   // Phased strategic roadmap — sits after the evidence/benchmarks, before the
   // week-one action checklist renders.
   const roadmap = roadmapSection(findings, currency);
@@ -2693,10 +2827,13 @@ export const buildReportDocumentFromAudit = (audit) => {
         ? `The single most important finding in this audit: ${netAdjustedText(top.estimatedImpact, top, currency)}`
         : `The biggest issue is ${top.title}. It is a business risk, but the available data does not support a reliable money estimate.`,
       paragraphs: [
+        // The analyst's verified account story leads when present — it is the
+        // full-data narrative; the deterministic paragraphs follow as anchors.
+        ...(analystDoc ? analystExecutiveParagraphs(analystDoc) : []),
         // Root-cause synthesis leads when the account has a binding constraint
         // (a policy block or a geo misconfiguration), framing the real story
         // before the lead-issue restatement.
-        ...(rootCauseSynthesis(findings) ? [rootCauseSynthesis(findings)] : []),
+        ...(!analystDoc && rootCauseSynthesis(findings) ? [rootCauseSynthesis(findings)] : []),
         `**Lead issue:** ${netAdjustedText(top.title, top, currency)}. ${emphasizeCampaignNames(netAdjustedText(top.detail, top, currency), campaignNames) || top.estimatedImpact || "This is the highest-priority finding in the account data."}`,
         `**Why it matters:** Findings are ranked by leverage — the most damaging issue leads (severity and root-cause gravity first, then confidence and recoverable spend), not simply the biggest dollar figure.`,
         "**Next move:** Start with the first issue in this report, then re-run the audit after the next full reporting cycle to measure the delta.",
@@ -2718,6 +2855,12 @@ export const buildReportDocumentFromAudit = (audit) => {
     },
     method_notes: [
       { label: "Numbers", text: "Every figure comes from verified account data. The report does not invent chart values." },
+      ...(analystStats
+        ? [{
+            label: "AI analyst",
+            text: `The strategist analysis was generated from the full raw dataset and machine-verified: ${analystStats.figuresVerified} of ${analystStats.figuresTotal} cited figures were recomputed from the account data and matched; ${analystStats.figuresDropped} that could not be verified were removed. Analyst-measured amounts join the headline total only when they replace an engine finding's already-reconciled figure.`,
+          }]
+        : []),
       ...(recoverable > 0
         ? [{
             label: "Money figures",

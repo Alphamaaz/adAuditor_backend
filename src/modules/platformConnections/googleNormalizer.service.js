@@ -352,6 +352,32 @@ export const normalizeCampaignDevicePerformance = (rows = []) =>
     })
     .filter((r) => (r.spend || 0) > 0 || (r.impressions || 0) > 0);
 
+// ── Campaign × day (campaign.name × segments.date) ───────────────────────────
+
+/**
+ * Normalize campaign-level daily rows into byDimension.campaign_day records —
+ * one row per campaign per day, so trend analysis can see per-campaign
+ * inflections the account-level byDay series averages away.
+ */
+export const normalizeGoogleCampaignDaily = (rows = []) =>
+  (rows || [])
+    .map((row) => {
+      const spend = microsToDecimal(row.metrics?.costMicros);
+      const conversions = parseNumber(row.metrics?.conversions);
+      return {
+        dimension: "campaign_day",
+        name: row.campaign?.name || "unknown",
+        date: row.segments?.date || null,
+        spend,
+        impressions: parseNumber(row.metrics?.impressions),
+        clicks: parseNumber(row.metrics?.clicks),
+        conversions,
+        results: conversions,
+        convValue: parseNumber(row.metrics?.conversionsValue),
+      };
+    })
+    .filter((r) => r.date && ((r.spend || 0) > 0 || (r.impressions || 0) > 0));
+
 // ── Landing page performance (landing_page_view) ─────────────────────────────
 
 export const normalizeLandingPagePerformance = (rows = []) =>

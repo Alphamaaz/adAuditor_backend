@@ -338,6 +338,7 @@ model Audit {
   ruleExecutions             RuleExecution[]
   aiReport                   AiReport?
   deepAuditReport            DeepAuditReport?
+  analystReport              AnalystReport?
   memorySummary              AuditMemorySummary?
   recommendationFeedback     RecommendationFeedback[]
   pdfReports                 PdfReport[]
@@ -477,6 +478,21 @@ model DeepAuditReport {
   updatedAt      DateTime @updatedAt
 
   audit          Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+}
+
+model AnalystReport {
+  id            String   @id @default(uuid())
+  auditId       String   @unique
+  provider      String
+  model         String
+  schemaVersion Int      @default(1)
+  report        Json
+  verification  Json?
+  usage         Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  audit         Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
 }
 
 model AuditMemorySummary {

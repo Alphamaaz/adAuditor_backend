@@ -433,6 +433,7 @@ const buildUserPrompt = (context) => {
   const auditFocus = bp.auditFocus || null;
   const auditFocusOther = bp.auditFocusOther || null;
   const deepAudit = context?.deepAudit || null;
+  const verifiedAnalyst = context?.verifiedAnalyst?.report || null;
   const promptEvidencePacket = context?.evidencePacket
     ? {
         ...context.evidencePacket,
@@ -474,6 +475,32 @@ const buildUserPrompt = (context) => {
         toolsRun: (deepAudit.reasoningTrace || []).map((step) => step.tool),
       })
     : "No separate Deep Audit loop result was available; use the evidence packet and verified findings.";
+  const verifiedAnalystContext = verifiedAnalyst
+    ? JSON.stringify({
+        executiveSummary: verifiedAnalyst.executiveSummary,
+        rootCause: verifiedAnalyst.rootCause,
+        findings: (verifiedAnalyst.findings || []).map((finding) => ({
+          id: finding.id,
+          title: finding.title,
+          claim: finding.claim,
+          confidence: finding.confidence,
+          recommendation: finding.recommendation,
+          figures: (finding.figures || [])
+            .filter((figure) => figure.verified === true)
+            .map(({ label, kind, value }) => ({ label, kind, value })),
+        })),
+        recommendations: (verifiedAnalyst.recommendations || []).map(
+          ({ priority, action, expectedImpact, figures }) => ({
+            priority,
+            action,
+            expectedImpact,
+            figures: (figures || [])
+              .filter((figure) => figure.verified === true)
+              .map(({ label, kind, value }) => ({ label, kind, value })),
+          })
+        ),
+      })
+    : "No verified full-data Analyst report was available.";
 
   return `Write the AI narrative for this paid advertising audit. Return ONLY valid JSON — no markdown, no preamble, no explanation outside the JSON.
 
@@ -485,7 +512,10 @@ ${focusHint}
 
 ${DEEP_REPORTING_RULES}
 
-DEEP AUDIT HYPOTHESIS RESULT:
+VERIFIED FULL-DATA ANALYST RESULT (authoritative when present):
+${verifiedAnalystContext}
+
+DEEP AUDIT HYPOTHESIS RESULT (supplementary; never override verified Analyst facts):
 ${deepAuditContext}
 
 REQUIRED JSON OUTPUT:

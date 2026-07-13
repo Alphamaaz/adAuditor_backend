@@ -21,7 +21,7 @@ const baseAudit = (overrides = {}) => ({
     data: { platforms: { GOOGLE: { records: [], byLevel: { campaign: [] }, byDimension: {}, byDay: [], currency: "PKR" } } },
   },
   ruleFindings: [
-    { ruleId: "CAMP-CPA-001", platform: "GOOGLE", severity: "CRITICAL", title: "Campaign dispersion", detail: "x", estimatedImpact: "PKR 4,000 is recoverable", evidence: { level: "campaign", confidence: "high" } },
+    { ruleId: "CAMP-CPA-001", platform: "GOOGLE", severity: "HIGH", title: "Campaign dispersion", detail: "x", estimatedImpact: "PKR 4,000 is recoverable", evidence: { level: "campaign", confidence: "high" } },
     { ruleId: "GOOGLE-NAMING-001", platform: "GOOGLE", severity: "LOW", title: "Inconsistent naming", detail: "x", estimatedImpact: "Account hygiene risk.", evidence: {} },
   ],
   ...overrides,

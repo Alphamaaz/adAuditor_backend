@@ -16,6 +16,7 @@ import {
   fetchAds,
   fetchBreakdownInsights,
   fetchDailyInsights,
+  fetchCampaignDailyInsights,
   META_BREAKDOWNS,
 } from "./meta.service.js";
 import {
@@ -28,6 +29,7 @@ import {
   buildMetaNormalizedDataset,
   normalizeBreakdownInsights,
   normalizeDailyInsights,
+  normalizeCampaignDailyInsights,
   normalizeStructureOnlyCampaigns,
   resolveAccountFamilies,
 } from "./metaNormalizer.service.js";
@@ -67,6 +69,7 @@ import {
   fetchCampaignDeviceBreakdown,
   fetchLandingPagePerformance,
   fetchGeoPerformance,
+  fetchCampaignDailySeries,
   resolveGeoTargetNames,
   resolveAudienceNames,
   fetchConversionActions,
@@ -86,6 +89,7 @@ import {
   normalizeCampaignDevicePerformance,
   normalizeLandingPagePerformance,
   normalizeGeoPerformance,
+  normalizeGoogleCampaignDaily,
   normalizeConversionActions,
   normalizeCampaignAssets,
   normalizeGoogleDailySegments,
@@ -712,6 +716,7 @@ export const fetchMetaDataForAudit = async (req, res) => {
     ),
     Promise.allSettled([
       fetchDailyInsights(accessToken, adAccountId, metaDateParam),
+      fetchCampaignDailyInsights(accessToken, adAccountId, metaDateParam),
     ]),
   ]);
 
@@ -730,6 +735,12 @@ export const fetchMetaDataForAudit = async (req, res) => {
     dailyResult[0]?.status === "fulfilled"
       ? normalizeDailyInsights(dailyResult[0].value, resultFamilies)
       : [];
+
+  // Per-campaign daily series — trend analysis on individual campaigns.
+  if (dailyResult[1]?.status === "fulfilled") {
+    const campaignDay = normalizeCampaignDailyInsights(dailyResult[1].value, resultFamilies);
+    if (campaignDay.length > 0) byDimension.campaign_day = campaignDay;
+  }
 
   // Build the normalized dataset in the schema the rule engine expects
   const normalizedDataset = buildMetaNormalizedDataset({
@@ -1258,6 +1269,20 @@ export const syncGoogleToAudit = async ({ organizationId, auditId, customerId })
     }
   } catch (geoErr) {
     console.warn(`[Google Ads] geo fetch failed (non-fatal): ${geoErr.message}`);
+  }
+
+  // Campaign×day series — BEST-EFFORT. Per-campaign trend analysis for the
+  // analyst and future trend rules; the account-level byDay stays the compact
+  // headline series.
+  try {
+    if (!customerInfo?.manager) {
+      const rawCampaignDaily = await fetchCampaignDailySeries(accessToken, customerId, googleDateParam);
+      const campaignDay = normalizeGoogleCampaignDaily(rawCampaignDaily);
+      if (campaignDay.length > 0) googleByDimension.campaign_day = campaignDay;
+      console.log(`[Google Ads] Normalized ${campaignDay.length} campaign-daily row(s).`);
+    }
+  } catch (cdErr) {
+    console.warn(`[Google Ads] campaign-daily fetch failed (non-fatal): ${cdErr.message}`);
   }
 
   // Conversion-action config — BEST-EFFORT. Powers GOOGLE-CONV-001

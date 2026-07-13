@@ -3,8 +3,10 @@
  * Snapshot/equivalence harness for the rule engine migration.
  *
  * Runs the legacy auditEngine.service.js AND the new registry against the
- * same set of synthetic audit contexts, then asserts byte-equivalent
- * findings for every rule that has been migrated.
+ * same set of synthetic audit contexts, then asserts equivalent rule-owned
+ * findings for every rule that has been migrated. Engine-wide trust metadata
+ * is removed before comparison because it is applied after legacy rule
+ * evaluation and is not owned by an individual registry rule.
  *
  * Usage:
  *   npm run rules:diff
@@ -132,13 +134,31 @@ const stableSortFindings = (findings) =>
     return (a.platform || "").localeCompare(b.platform || "");
   });
 
+const canonicalizeRuleFinding = (finding) => {
+  const { rootCause, evidence, ...ruleFinding } = finding;
+  const {
+    trust: _trust,
+    netRecoverable: _netRecoverable,
+    ...ruleEvidence
+  } = evidence || {};
+
+  // Legacy findings now receive a nullable rootCause and trust-layer evidence
+  // after rule evaluation. Preserve meaningful root causes, but ignore the
+  // post-processing defaults that registry rules never produce themselves.
+  return {
+    ...ruleFinding,
+    ...(rootCause ? { rootCause } : {}),
+    evidence: ruleEvidence,
+  };
+};
+
 const filterMigrated = (findings) =>
   findings.filter((f) => MIGRATED_LEGACY_IDS.has(f.ruleId));
 
 const runLegacy = (ctx) => {
   const audit = buildAuditFromContext(ctx);
   const { findings } = runDeterministicAudit(audit);
-  return stableSortFindings(filterMigrated(findings));
+  return stableSortFindings(filterMigrated(findings).map(canonicalizeRuleFinding));
 };
 
 const runRegistry = async (ctx) => {
@@ -155,7 +175,7 @@ const runRegistry = async (ctx) => {
       throw err;
     }
   }
-  return stableSortFindings(findings);
+  return stableSortFindings(findings.map(canonicalizeRuleFinding));
 };
 
 const deepEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);

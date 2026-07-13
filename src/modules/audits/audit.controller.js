@@ -342,6 +342,7 @@ export const getAuditPremiumReportHtml = async (req, res) => {
         },
       },
       aiReport: true,
+      analystReport: true,
       pdfReports: {
         orderBy: {
           createdAt: "desc",

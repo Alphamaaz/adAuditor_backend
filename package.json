@@ -21,6 +21,9 @@
     "rules:samples": "node src/rules/scripts/sample-findings.js",
     "rules:inventory": "node src/rules/scripts/inventory.js",
     "ai:eval": "node src/ai/eval/run.js",
+    "analyst:eval": "node --env-file=.env src/modules/audits/analyst/eval/run.js",
+    "analyst:corpus:check": "node scripts/anonymizeCorpus.js --check",
+    "analyst:corpus:anonymize": "node scripts/anonymizeCorpus.js",
     "deep:eval": "node src/modules/audits/agent/eval/run.js",
     "deep:smoke": "node src/modules/audits/agent/eval/run.js --only ctr-not-cpm"
   },

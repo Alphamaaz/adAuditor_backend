@@ -259,6 +259,29 @@ export const fetchDailyInsights = async (
 };
 
 /**
+ * Fetch campaign-level daily time series (time_increment=1). One row per
+ * campaign per day — powers per-campaign trend analysis (spend/CPA inflections
+ * the account-level byDay series averages away). Best-effort.
+ */
+export const fetchCampaignDailyInsights = async (
+  accessToken,
+  adAccountId,
+  datePreset = "last_30d"
+) => {
+  const { data } = await axios.get(`${GRAPH_BASE}/${adAccountId}/insights`, {
+    params: {
+      access_token: accessToken,
+      level: "campaign",
+      ...buildDateParams(datePreset),
+      time_increment: 1,
+      fields: `campaign_name,${BREAKDOWN_FIELDS}`,
+      limit: 1000,
+    },
+  });
+  return data.data || [];
+};
+
+/**
  * Fetch all campaigns in an account (for structure audit — status, budget etc.)
  */
 export const fetchCampaigns = async (accessToken, adAccountId) => {
@@ -295,9 +318,11 @@ export const fetchAds = async (accessToken, adAccountId) => {
       access_token: accessToken,
       // `effective_status` exposes DISAPPROVED / WITH_ISSUES (the policy block
       // that can gate most of an account's delivery); `ad_review_feedback`
-      // carries the specific policy reason for the narrative.
+      // carries the specific policy reason for the narrative. `creative{...}`
+      // carries the actual ad content (headline/body/CTA) so creative analysis
+      // can talk about what the ads SAY, not just how they performed.
       fields:
-        "name,status,effective_status,ad_review_feedback,adset_id,adset{name},campaign_id,campaign{name}",
+        "name,status,effective_status,ad_review_feedback,adset_id,adset{name},campaign_id,campaign{name},creative{id,title,body,call_to_action_type,object_story_spec}",
       limit: 500,
     },
   });

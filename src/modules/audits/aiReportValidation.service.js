@@ -83,8 +83,8 @@ export const validateAiReportOutput = ({ output, findings }) => {
 // ── Factuality check ────────────────────────────────────────────────────────
 // Scans the AI output for dollar amounts that do NOT appear in the verified
 // evidence (packet verifiedNumbers + finding evidence). Lightweight + tolerant:
-// it returns warnings, never hard-fails the report, so retries/fallback stay
-// intact. Percentages and multipliers ("3×") are intentionally NOT checked —
+// it returns a verdict plus diagnostics; production treats failure as a
+// retry/fallback condition. Percentages and multipliers ("3×") are intentionally NOT checked —
 // the prompt legitimately asks the model to express goal ratios.
 
 const MONEY_RX =

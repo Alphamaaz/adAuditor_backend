@@ -57,4 +57,40 @@ describe("evidence-packet-first prompt", () => {
     // No raw record arrays leaked.
     expect(prompt).not.toContain('"byLevel"');
   });
+
+  it("treats a verified Analyst result as authoritative and Deep Audit as supplementary", () => {
+    const context = buildAiAuditContext(auditFixture(), { priorAudits: [] });
+    context.verifiedAnalyst = {
+      report: {
+        executiveSummary: "Verified account story without unsupported numbers.",
+        rootCause: "The verified root cause is conversion measurement quality.",
+        findings: [
+          {
+            id: "AN-MEASUREMENT",
+            title: "Measurement needs repair",
+            claim: "Conversion reporting is inconsistent.",
+            confidence: "high",
+            recommendation: "Repair the primary conversion action.",
+            figures: [],
+          },
+        ],
+        recommendations: [],
+      },
+    };
+    context.deepAudit = {
+      mode: "deep",
+      report: {
+        headline: "Supplementary hypothesis",
+        rootCause: "An older aggregate-only diagnosis.",
+        confidence: "medium",
+        recommendations: [],
+      },
+      reasoningTrace: [],
+    };
+
+    const prompt = buildUserPrompt(context);
+    expect(prompt).toContain("VERIFIED FULL-DATA ANALYST RESULT (authoritative when present)");
+    expect(prompt).toContain("Verified account story without unsupported numbers.");
+    expect(prompt).toContain("supplementary; never override verified Analyst facts");
+  });
 });

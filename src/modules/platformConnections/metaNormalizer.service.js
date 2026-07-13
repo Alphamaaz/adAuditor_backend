@@ -237,6 +237,31 @@ const summarizeReviewFeedback = (feedback) => {
   return reasons.size ? Array.from(reasons).join("; ") : null;
 };
 
+/**
+ * Extract the human-visible ad content from a Meta creative object. Text lives
+ * in different places depending on ad format: direct title/body (simple ads),
+ * object_story_spec.link_data (link ads: name=headline, message=primary text,
+ * description=sub-headline), or object_story_spec.video_data. Returns nulls
+ * for what isn't present — never throws on odd shapes.
+ */
+export const extractCreativeContent = (creative) => {
+  if (!creative || typeof creative !== "object") {
+    return { creativeTitle: null, creativeBody: null, creativeCta: null };
+  }
+  const spec = creative.object_story_spec || {};
+  const link = spec.link_data || {};
+  const video = spec.video_data || {};
+  const title = creative.title || link.name || video.title || null;
+  const body = creative.body || link.message || video.message || null;
+  const cta =
+    creative.call_to_action_type ||
+    link.call_to_action?.type ||
+    video.call_to_action?.type ||
+    null;
+  const clip = (s) => (typeof s === "string" ? s.slice(0, 300) : null);
+  return { creativeTitle: clip(title), creativeBody: clip(body), creativeCta: cta || null };
+};
+
 export const enrichAdsWithStructure = (insightRecords, structureRecords) => {
   const byName = {};
   structureRecords.forEach((a) => {
@@ -250,6 +275,7 @@ export const enrichAdsWithStructure = (insightRecords, structureRecords) => {
       ...record,
       status: struct.effective_status || struct.status,
       reviewFeedback: summarizeReviewFeedback(struct.ad_review_feedback),
+      ...extractCreativeContent(struct.creative),
     };
   });
 };
@@ -278,6 +304,29 @@ export const normalizeBreakdownInsights = (insights, dimension, segmentField, fa
       cpa: cpaFromSpend(spend, results),
     };
   });
+
+/**
+ * Normalize campaign-level daily rows (level=campaign, time_increment=1) into
+ * byDimension.campaign_day records — one row per campaign per day, so trend
+ * analysis can see per-campaign inflections the account series averages away.
+ */
+export const normalizeCampaignDailyInsights = (insights, families) =>
+  (insights || [])
+    .map((row) => {
+      const spend = parseNumber(row.spend);
+      const results = resultForFamilies(row.actions, families) || 0;
+      return {
+        dimension: "campaign_day",
+        name: row.campaign_name || "unknown",
+        date: row.date_start,
+        spend,
+        impressions: parseNumber(row.impressions),
+        clicks: parseNumber(row.clicks),
+        results,
+        conversions: results,
+      };
+    })
+    .filter((r) => (r.spend || 0) > 0 || (r.impressions || 0) > 0);
 
 /**
  * Normalize daily time-series rows (time_increment=1).
