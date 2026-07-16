@@ -309,22 +309,36 @@ export const fetchAdSets = async (accessToken, adAccountId) => {
   return data.data || [];
 };
 
+// `effective_status` exposes DISAPPROVED / WITH_ISSUES (the policy block that
+// can gate most of an account's delivery); `ad_review_feedback` carries the
+// specific policy reason for the narrative.
+const AD_STRUCTURE_FIELDS =
+  "name,status,effective_status,ad_review_feedback,adset_id,adset{name},campaign_id,campaign{name}";
+// `creative{...}` carries the actual ad content (headline/body/CTA) so creative
+// analysis can talk about what the ads SAY, not just how they performed.
+const AD_CREATIVE_FIELDS = `${AD_STRUCTURE_FIELDS},creative{id,title,body,call_to_action_type,object_story_spec}`;
+
 /**
- * Fetch all ads in an account.
+ * Fetch all ads in an account. Creative sub-fields are permission-gated on
+ * some accounts (client accounts reached via business_management) — when the
+ * Graph API rejects them, degrade to the structural fields instead of failing
+ * the whole data pull. fetchAds sits in the pull's hard Promise.all, so an
+ * optional nice-to-have field must never be able to 500 the audit.
  */
 export const fetchAds = async (accessToken, adAccountId) => {
-  const { data } = await axios.get(`${GRAPH_BASE}/${adAccountId}/ads`, {
-    params: {
-      access_token: accessToken,
-      // `effective_status` exposes DISAPPROVED / WITH_ISSUES (the policy block
-      // that can gate most of an account's delivery); `ad_review_feedback`
-      // carries the specific policy reason for the narrative. `creative{...}`
-      // carries the actual ad content (headline/body/CTA) so creative analysis
-      // can talk about what the ads SAY, not just how they performed.
-      fields:
-        "name,status,effective_status,ad_review_feedback,adset_id,adset{name},campaign_id,campaign{name},creative{id,title,body,call_to_action_type,object_story_spec}",
-      limit: 500,
-    },
-  });
-  return data.data || [];
+  const get = async (fields) => {
+    const { data } = await axios.get(`${GRAPH_BASE}/${adAccountId}/ads`, {
+      params: { access_token: accessToken, fields, limit: 500 },
+    });
+    return data.data || [];
+  };
+  try {
+    return await get(AD_CREATIVE_FIELDS);
+  } catch (err) {
+    const reason = err.response?.data?.error?.message || err.message;
+    console.warn(
+      `[meta] fetchAds with creative fields failed (${reason}) — retrying without creative content`
+    );
+    return get(AD_STRUCTURE_FIELDS);
+  }
 };

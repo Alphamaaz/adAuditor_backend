@@ -317,9 +317,17 @@ export const tikTokOAuthCallback = async (req, res) => {
     const tokenData = await exchangeTikTokCode(authCode);
     const accessToken = tokenData.access_token;
     const advertiserIds = tokenData.advertiser_ids || [];
-    const scopes = Array.isArray(tokenData.scope)
-      ? tokenData.scope
-      : (tokenData.scope || "").split(",").map((s) => s.trim()).filter(Boolean);
+    // TikTok Business API returns `scope` as an array of NUMERIC permission
+    // IDs (e.g. [8, 1, 2, 4]), not scope name strings — the scopes column is
+    // String[], so every element must be coerced regardless of which shape
+    // TikTok sent (array of numbers, or a comma-separated string).
+    const scopes = (
+      Array.isArray(tokenData.scope)
+        ? tokenData.scope
+        : (tokenData.scope || "").split(",")
+    )
+      .map((s) => String(s).trim())
+      .filter(Boolean);
 
     const encryptedToken = encrypt(accessToken);
 
