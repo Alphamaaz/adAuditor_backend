@@ -27,8 +27,13 @@ export const exchangeCodeForToken = async (authCode) => {
  * Get the list of advertiser accounts associated with the access token.
  */
 export const fetchAdvertiserList = async (accessToken) => {
+  // TikTok's Business API reads the token ONLY from the Access-Token header —
+  // an access_token query param is silently ignored, which is why this
+  // endpoint reported "The access_token is empty" (code 40104) with a real,
+  // valid token. fetchReport below already does this correctly.
   const { data } = await axios.get(`${TIKTOK_API_BASE}/oauth2/advertiser/get/`, {
-    params: { app_id: APP_ID(), secret: APP_SECRET(), access_token: accessToken },
+    headers: { "Access-Token": accessToken },
+    params: { app_id: APP_ID(), secret: APP_SECRET() },
   });
 
   if (data.code !== 0) {
