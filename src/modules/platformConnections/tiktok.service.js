@@ -1,26 +1,90 @@
 import axios from "axios";
+import { AppError } from "../../utils/appError.js";
 
 const TIKTOK_API_BASE = "https://business-api.tiktok.com/open_api/v1.3";
 
 const APP_ID = () => process.env.TIKTOK_APP_ID;
 const APP_SECRET = () => process.env.TIKTOK_APP_SECRET;
 
+const permissionErrorPattern = /permission|scope|not authori[sz]ed|access denied|no access/i;
+const tokenErrorPattern = /access.?token|token.*(?:invalid|expired)|unauthenticated/i;
+const rateLimitPattern = /rate.?limit|too many request|frequency limit/i;
+const requestErrorPattern = /invalid (?:parameter|metric|dimension)|not supported|parameter error/i;
+
+const requestIdSuffix = (requestId) =>
+  requestId ? ` TikTok request ID: ${requestId}.` : "";
+
+/**
+ * Convert TikTok's HTTP-200 API errors and Axios transport errors into safe,
+ * actionable operational errors. The raw platform response remains in server
+ * logs for diagnosis; tokens and request payloads are never logged.
+ */
+const toTikTokError = (error, operation) => {
+  if (error instanceof AppError) return error;
+
+  const payload = error?.response?.data || error || {};
+  const platformMessage = String(payload.message || error?.message || "Unknown TikTok API error");
+  const platformCode = payload.code ?? null;
+  const requestId = payload.request_id || payload.data?.request_id || null;
+  const httpStatus = error?.response?.status || null;
+
+  console.error(`[TikTok Ads] ${operation} failed`, {
+    platformCode,
+    platformMessage,
+    requestId,
+    httpStatus,
+  });
+
+  let statusCode = 502;
+  let message = `TikTok could not return advertising data right now. Please try again.${requestIdSuffix(requestId)}`;
+
+  if (permissionErrorPattern.test(platformMessage)) {
+    statusCode = 403;
+    message =
+      "TikTok authorized the advertiser account, but reporting access was not granted. " +
+      "Enable Reporting > Consolidated Report for this app and make sure your TikTok user can view this ad account, then reconnect it." +
+      requestIdSuffix(requestId);
+  } else if (tokenErrorPattern.test(platformMessage) || httpStatus === 401) {
+    statusCode = 401;
+    message = `The TikTok connection is no longer valid. Reconnect TikTok Ads and try again.${requestIdSuffix(requestId)}`;
+  } else if (rateLimitPattern.test(platformMessage) || httpStatus === 429) {
+    statusCode = 429;
+    message = `TikTok's reporting limit was reached. Wait a few minutes and try again.${requestIdSuffix(requestId)}`;
+  } else if (requestErrorPattern.test(platformMessage)) {
+    message = `TikTok rejected part of the reporting request. Please retry after updating Ad Adviser.${requestIdSuffix(requestId)}`;
+  }
+
+  const operationalError = new AppError(message, statusCode, {
+    details: { operation, platformCode, platformMessage, requestId, httpStatus },
+  });
+  operationalError.cause = error;
+  return operationalError;
+};
+
+const assertTikTokSuccess = (data, operation) => {
+  if (data?.code !== 0) {
+    throw toTikTokError(data, operation);
+  }
+  return data;
+};
+
 /**
  * Exchange the auth_code (TikTok Business API) for an access token.
  * TikTok Business API uses app_id/secret, not client_key/client_secret.
  */
 export const exchangeCodeForToken = async (authCode) => {
-  const { data } = await axios.post(
-    `${TIKTOK_API_BASE}/oauth2/access_token/`,
-    { app_id: APP_ID(), secret: APP_SECRET(), auth_code: authCode },
-    { headers: { "Content-Type": "application/json" } }
-  );
+  try {
+    const { data } = await axios.post(
+      `${TIKTOK_API_BASE}/oauth2/access_token/`,
+      { app_id: APP_ID(), secret: APP_SECRET(), auth_code: authCode },
+      { headers: { "Content-Type": "application/json" } }
+    );
 
-  if (data.code !== 0) {
-    throw new Error(`TikTok Auth Error: ${data.message} (Code: ${data.code})`);
+    assertTikTokSuccess(data, "token exchange");
+    return data.data; // { access_token, advertiser_ids, scope, token_type }
+  } catch (error) {
+    throw toTikTokError(error, "token exchange");
   }
-
-  return data.data; // { access_token, advertiser_ids, scope, token_type }
 };
 
 /**
@@ -31,16 +95,17 @@ export const fetchAdvertiserList = async (accessToken) => {
   // an access_token query param is silently ignored, which is why this
   // endpoint reported "The access_token is empty" (code 40104) with a real,
   // valid token. fetchReport below already does this correctly.
-  const { data } = await axios.get(`${TIKTOK_API_BASE}/oauth2/advertiser/get/`, {
-    headers: { "Access-Token": accessToken },
-    params: { app_id: APP_ID(), secret: APP_SECRET() },
-  });
+  try {
+    const { data } = await axios.get(`${TIKTOK_API_BASE}/oauth2/advertiser/get/`, {
+      headers: { "Access-Token": accessToken },
+      params: { app_id: APP_ID(), secret: APP_SECRET() },
+    });
 
-  if (data.code !== 0) {
-    throw new Error(`TikTok API Error: ${data.message} (Code: ${data.code})`);
+    assertTikTokSuccess(data, "advertiser list");
+    return data.data?.list || [];
+  } catch (error) {
+    throw toTikTokError(error, "advertiser list");
   }
-
-  return data.data?.list || [];
 };
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -61,23 +126,25 @@ const fetchReport = async (accessToken, advertiserId, dataLevel, dimensions, met
   let page = 1;
 
   while (true) {
-    const { data } = await axios.get(`${TIKTOK_API_BASE}/report/integrated/get/`, {
-      headers: { "Access-Token": accessToken },
-      params: {
-        advertiser_id: advertiserId,
-        report_type: reportType,
-        data_level: dataLevel,
-        dimensions: JSON.stringify(dimensions),
-        metrics: JSON.stringify(metrics),
-        start_date: startDate,
-        end_date: endDate,
-        page_size: 1000,
-        page,
-      },
-    });
-
-    if (data.code !== 0) {
-      throw new Error(`TikTok Reporting Error: ${data.message} (Code: ${data.code})`);
+    let data;
+    try {
+      const response = await axios.get(`${TIKTOK_API_BASE}/report/integrated/get/`, {
+        headers: { "Access-Token": accessToken },
+        params: {
+          advertiser_id: String(advertiserId),
+          report_type: reportType,
+          data_level: dataLevel,
+          dimensions: JSON.stringify(dimensions),
+          metrics: JSON.stringify(metrics),
+          start_date: startDate,
+          end_date: endDate,
+          page_size: 1000,
+          page,
+        },
+      });
+      data = assertTikTokSuccess(response.data, `${dataLevel} report`);
+    } catch (error) {
+      throw toTikTokError(error, `${dataLevel} report`);
     }
 
     const list = data.data?.list || [];
@@ -95,7 +162,7 @@ const CAMPAIGN_METRICS = [
   "campaign_name",
   "objective_type",
   "campaign_budget",
-  "campaign_budget_mode",
+  "campaign_automation_type",
   "spend",
   "impressions",
   "clicks",
@@ -110,6 +177,8 @@ const CAMPAIGN_METRICS = [
 
 const ADGROUP_METRICS = [
   "adgroup_name",
+  "campaign_id",
+  "campaign_name",
   "spend",
   "impressions",
   "clicks",
@@ -120,15 +189,18 @@ const ADGROUP_METRICS = [
   "ctr",
   "cpc",
   "cpm",
-  "bid_price",
-  "optimization_goal",
+  "bid",
+  "optimization_event",
   "placement_type",
   "budget",
-  "status",
 ];
 
 const AD_METRICS = [
   "ad_name",
+  "adgroup_id",
+  "adgroup_name",
+  "campaign_id",
+  "campaign_name",
   "spend",
   "impressions",
   "clicks",
@@ -139,7 +211,6 @@ const AD_METRICS = [
   "ctr",
   "cpc",
   "cpm",
-  "status",
 ];
 
 export const fetchCampaignReport = async (accessToken, advertiserId, daysBack = 30) => {
@@ -151,7 +222,7 @@ export const fetchAdGroupReport = async (accessToken, advertiserId, daysBack = 3
   const { start_date, end_date } = getDateRange(daysBack);
   return fetchReport(
     accessToken, advertiserId, "AUCTION_ADGROUP",
-    ["adgroup_id", "campaign_id"], ADGROUP_METRICS, start_date, end_date
+    ["adgroup_id"], ADGROUP_METRICS, start_date, end_date
   );
 };
 
@@ -159,7 +230,7 @@ export const fetchAdReport = async (accessToken, advertiserId, daysBack = 30) =>
   const { start_date, end_date } = getDateRange(daysBack);
   return fetchReport(
     accessToken, advertiserId, "AUCTION_AD",
-    ["ad_id", "adgroup_id", "campaign_id"], AD_METRICS, start_date, end_date
+    ["ad_id"], AD_METRICS, start_date, end_date
   );
 };
 

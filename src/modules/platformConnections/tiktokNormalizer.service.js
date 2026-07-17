@@ -13,6 +13,7 @@ export const normalizeCampaigns = (rawList) =>
       objective: m.objective_type || null,
       budget: toNum(m.campaign_budget),
       budgetMode: m.campaign_budget_mode || null,
+      automationType: m.campaign_automation_type || null,
       spend: toNum(m.spend),
       impressions: toNum(m.impressions),
       clicks: toNum(m.clicks),
@@ -32,7 +33,7 @@ export const normalizeAdGroups = (rawList) =>
     const m = item.metrics || {};
     return {
       id: d.adgroup_id,
-      campaignId: d.campaign_id,
+      campaignId: d.campaign_id || m.campaign_id || null,
       name: m.adgroup_name || d.adgroup_id,
       spend: toNum(m.spend),
       impressions: toNum(m.impressions),
@@ -44,8 +45,8 @@ export const normalizeAdGroups = (rawList) =>
       ctr: toNum(m.ctr),
       cpc: toNum(m.cpc),
       cpm: toNum(m.cpm),
-      bid: toNum(m.bid_price),
-      optimizationGoal: m.optimization_goal || null,
+      bid: toNum(m.bid ?? m.bid_price),
+      optimizationGoal: m.optimization_event || m.optimization_goal || null,
       placementType: m.placement_type || null,
       budget: toNum(m.budget),
       status: m.status || null,
@@ -58,8 +59,8 @@ export const normalizeAds = (rawList) =>
     const m = item.metrics || {};
     return {
       id: d.ad_id,
-      adGroupId: d.adgroup_id,
-      campaignId: d.campaign_id,
+      adGroupId: d.adgroup_id || m.adgroup_id || null,
+      campaignId: d.campaign_id || m.campaign_id || null,
       name: m.ad_name || d.ad_id,
       spend: toNum(m.spend),
       impressions: toNum(m.impressions),
