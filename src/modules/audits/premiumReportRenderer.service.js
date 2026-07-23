@@ -1,4 +1,9 @@
+import { readFileSync } from "node:fs";
 import { buildReportDocumentFromAudit } from "./reportDocument.service.js";
+
+const defaultBrandLogo = `data:image/svg+xml;base64,${readFileSync(
+  new URL("../../assets/adadviser_logo.svg", import.meta.url)
+).toString("base64")}`;
 
 const escapeHtml = (value) =>
   String(value ?? "")
@@ -209,7 +214,7 @@ const renderMasthead = (doc, branding = {}) => {
     ? `<img src="${escapeHtml(branding.logoBase64)}" alt="${escapeHtml(branding.companyName || "Logo")}" class="brand-logo"/>`
     : branding.companyName
       ? `<div class="logo">${escapeHtml(branding.companyName)}</div>`
-      : `<div class="logo">Ad<b>Adviser</b></div>`;
+      : `<div class="logo default-logo-lockup"><img src="${defaultBrandLogo}" alt="" class="default-brand-logo"/><span>Ad<b>Adviser</b></span></div>`;
 
   return `<header class="masthead" style="background:${escapeHtml(bgColor)}">
     <div class="mast-brand">
@@ -677,18 +682,22 @@ const premiumPolishOverrides = `.status-pill{display:inline-block;font:600 10.5p
 // defined in premiumReportStyles handle full-bleed layout for @media print.
 const pdfOverrides = `body{background:#0b0712;font-size:13.5px}.sheet{margin:0;max-width:100%;box-shadow:none;border:none}.pad{padding:0 40px}.masthead{padding:34px 40px 30px}.masthead:after{display:none}.mast-title h1{font-size:28px}.mast-grid{gap:28px}.body-wrap{padding-top:36px;padding-bottom:30px}.section{margin-bottom:38px}.keystrip{break-inside:avoid}`;
 
+const brandLogoStyles = `.default-logo-lockup{display:flex;align-items:center;gap:10px}.default-brand-logo{display:block;width:34px;height:36px;object-fit:contain}.doc-foot-brand{display:inline-flex;align-items:center;gap:7px}.doc-foot-logo{width:18px;height:20px;object-fit:contain}`;
+
 const docFootHtml = (branding = {}) => {
-  const name = escapeHtml(branding.companyName || "AdAdviser");
+  const name = branding.companyName || branding.logoBase64
+    ? escapeHtml(branding.companyName || "AdAdviser")
+    : `<span class="doc-foot-brand"><img src="${defaultBrandLogo}" alt="" class="doc-foot-logo"/>AdAdviser</span>`;
   const right = branding.website
     ? `<a href="${escapeHtml(branding.website)}" style="color:inherit;text-decoration:none">${escapeHtml(branding.website)}</a>`
     : "Figures come from verified account data · narrative explains the evidence";
   return `<div class="doc-foot"><span><b>${name}</b> · AI-powered PPC audits</span><span>${right}</span></div>`;
 };
 
-export const renderReport = (doc, branding = {}) => `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AdAdviser Performance Audit</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet"><style>${premiumReportStyles}${embeddedReportOverrides}${premiumPolishOverrides}</style></head><body><div class="sheet">${renderMasthead(doc, branding)}${renderKeyNumbers(doc.key_numbers)}<div class="pad body-wrap">${renderTableOfContents(doc)}${renderExecutiveSummary(doc.executive_summary)}${(doc.sections || []).map(renderSection).join("")}${renderMethod(doc.method_notes)}${docFootHtml(branding)}</div></div></body></html>`;
+export const renderReport = (doc, branding = {}) => `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AdAdviser Performance Audit</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet"><style>${premiumReportStyles}${brandLogoStyles}${embeddedReportOverrides}${premiumPolishOverrides}</style></head><body><div class="sheet">${renderMasthead(doc, branding)}${renderKeyNumbers(doc.key_numbers)}<div class="pad body-wrap">${renderTableOfContents(doc)}${renderExecutiveSummary(doc.executive_summary)}${(doc.sections || []).map(renderSection).join("")}${renderMethod(doc.method_notes)}${docFootHtml(branding)}</div></div></body></html>`;
 
 export const renderReportForPdf = (doc, branding = {}) => {
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AdAdviser Performance Audit</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet"><style>${premiumReportStyles}${premiumPolishOverrides}${pdfOverrides}</style></head><body><div class="sheet">${renderMasthead(doc, branding)}${renderKeyNumbers(doc.key_numbers)}<div class="pad body-wrap">${renderTableOfContents(doc)}${renderExecutiveSummary(doc.executive_summary)}${(doc.sections || []).map(renderSection).join("")}${renderMethod(doc.method_notes)}${docFootHtml(branding)}</div></div></body></html>`;
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>AdAdviser Performance Audit</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet"><style>${premiumReportStyles}${brandLogoStyles}${premiumPolishOverrides}${pdfOverrides}</style></head><body><div class="sheet">${renderMasthead(doc, branding)}${renderKeyNumbers(doc.key_numbers)}<div class="pad body-wrap">${renderTableOfContents(doc)}${renderExecutiveSummary(doc.executive_summary)}${(doc.sections || []).map(renderSection).join("")}${renderMethod(doc.method_notes)}${docFootHtml(branding)}</div></div></body></html>`;
 };
 
 export const renderAuditPremiumReportHtml = (audit, branding = {}) => renderReport(buildReportDocumentFromAudit(audit), branding);
